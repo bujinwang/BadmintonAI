@@ -114,7 +114,7 @@ def rally_server(points_sets: list[dict]) -> dict[int, str]:
     for s in points_sets:
         prev = None
         for p in s["points"]:
-            if prev is not None:
+            if prev is not None and p["rally"] is not None:
                 out[int(p["rally"])] = prev
             prev = p["winner"]
     return out

@@ -100,14 +100,27 @@ def roles_df(match_id: str, start: int | None = None, end: int | None = None) ->
     df = con.execute(q + " ORDER BY frame_num", params).fetch_df()
     con.close()
 
-    rows = []
-    for frame, g in df.groupby("frame_num"):
-        by_id = {r.player_id: r for r in g.itertuples(index=False)}
-        for side, slots in (("near", NEAR_SLOTS), ("far", FAR_SLOTS)):
-            if slots[0] in by_id and slots[1] in by_id:
-                rows.append({"frame_num": int(frame), "side": side,
-                             **_pair_roles(by_id[slots[0]], by_id[slots[1]])})
-    return pd.DataFrame(rows)
+    pairs = []
+    for side, (a, b) in (("near", NEAR_SLOTS), ("far", FAR_SLOTS)):
+        g = df[df.player_id == a].merge(df[df.player_id == b], on="frame_num",
+                                       suffixes=("_a", "_b"))
+        if g.empty:
+            continue
+        da = (g.court_y_a - court.NET_Y_M).abs()
+        db_ = (g.court_y_b - court.NET_Y_M).abs()
+        a_front, a_left = da <= db_, g.court_x_a <= g.court_x_b
+        depth = (g.court_y_a - g.court_y_b).abs()
+        lateral = (g.court_x_a - g.court_x_b).abs()
+        pairs.append(pd.DataFrame({
+            "frame_num": g.frame_num.astype(int), "side": side,
+            "front": np.where(a_front, a, b), "back": np.where(a_front, b, a),
+            "left": np.where(a_left, a, b), "right": np.where(a_left, b, a),
+            "depth_gap": depth, "lateral_gap": lateral, "front_margin": db_ - da,
+            "formation": np.where(depth > lateral, "attack", "defence"),
+        }))
+    # Stable frame ordering keeps near before far, matching the per-frame role helper.
+    return (pd.concat(pairs).sort_values("frame_num", kind="stable").reset_index(drop=True)
+            if pairs else pd.DataFrame())
 
 
 def formation_summary(match_id: str) -> pd.DataFrame:

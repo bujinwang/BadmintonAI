@@ -105,6 +105,75 @@ def team_slot_names(match_id: str) -> dict[tuple[str, int], str] | None:
             ("B", 0): slot_name.get("far"), ("B", 1): slot_name.get("far2")}
 
 
+def set_anchors(match_id: str) -> None:
+    """Print per-set guidance + a paste-ready `doubles_identity` skeleton.
+
+    The hard part of all-set identity is NOT the algorithm (`resolve` names any set from a
+    roster) — it's that a pair's two members wear identical kit, so geometry can't tell
+    them apart. Which PAIR (A/B) is on each side per set IS deterministic (`sets.analyze`,
+    off the set-1 anchor + the end-swap schedule), so this auto-fills that and leaves a
+    human only the within-pair left/right pick. It does NOT auto-pick the anchor frame: a
+    close-up/replay or a net cluster can spuriously pass "4 distinct quadrants", and the
+    homography is only valid in the wide broadcast angle — so it prints each set's time
+    range and asks you to pick a clean wide serve, confirmed with `--label-frame F`."""
+    from . import sets
+    s1 = (config.get_match(match_id).get("doubles_identity") or {})
+    s1 = s1.get(1, s1.get("1"))
+    if not s1:
+        raise SystemExit("set-1 doubles_identity must exist first (it names the pairs A/B)")
+    members = {"A": [s1["near_left"], s1["near_right"]],     # sets.py: A = set-1 near pair
+               "B": [s1["far_left"], s1["far_right"]]}        #          B = set-1 far pair
+    fps = config.get_match(match_id).get("fps", 30)
+    ts = lambda f: f"{int(f / fps // 60)}:{int(f / fps % 60):02d}"
+    rs = sets.analyze(match_id)
+    print(f"# 1) scrub each set's range to a CLEAN WIDE SERVE (4 players in their service boxes)")
+    print(f"# 2) note its frame, run: python -m badminton.doubles.identity {match_id} --label-frame <F>")
+    print(f"# 3) open the saved PNG, name the player in each labelled box, paste below into matches.yaml\n")
+    for sn in sorted({r["set"] for r in rs}):
+        g = [r for r in rs if r["set"] == sn]
+        npair, fpair = g[0]["near_pair"], g[0]["far_pair"]
+        print(f"  # SET {sn}: frames {g[0]['start']}-{g[-1]['end']} ({ts(g[0]['start'])}-{ts(g[-1]['end'])}); "
+              f"opening serve near {ts(g[0]['start'])}")
+        print(f"  {sn}:")
+        print(f"    anchor_frame: ???   # a clean wide serve in {g[0]['start']}-{g[-1]['end']}")
+        for q, pair in (("near_left", npair), ("near_right", npair),
+                        ("far_left", fpair), ("far_right", fpair)):
+            print(f"    {q}: ?    # {' | '.join(members[pair])}  (pair {pair})")
+        print()
+
+
+def label_frame(match_id: str, frame: int, out: str | None = None) -> str:
+    """Save the exact video frame with each tracked slot's bbox + its service-court
+    quadrant drawn, so you can name the player in each quadrant without reasoning about the
+    court-coordinate convention. Quadrants are read straight off that frame, so if it's not
+    a clean serve (two players share a quadrant), the labels collide — pick another frame."""
+    import cv2
+    m = config.get_match(match_id)
+    con = db.connect(read_only=True)
+    rows = con.execute(
+        "SELECT player_id, bbox, court_x, court_y FROM tracks WHERE match_id=? AND frame_num=? "
+        "AND player_id IN ('near','near2','far','far2')", [match_id, int(frame)]).fetchall()
+    con.close()
+    if not rows:
+        raise SystemExit(f"no tracks at frame {frame} — pick a frame inside a rally")
+    cap = cv2.VideoCapture(str(config.REPO_ROOT / m["video_path"]))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame))
+    ok, img = cap.read()
+    cap.release()
+    if not ok:
+        raise SystemExit(f"could not read frame {frame}")
+    for pid, bbox, cx, cy in rows:
+        if bbox is None:
+            continue
+        x, y, w, h = (int(v) for v in bbox)
+        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 3)
+        cv2.putText(img, quadrant_of(cx, cy).upper(), (x, max(22, y - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+    out = out or f"data/identity_frame_{frame}.png"
+    cv2.imwrite(out, img)
+    return out
+
+
 def names_df(match_id: str, set_no: int = 1) -> pd.DataFrame:
     """All tracked rows for the match with a `name` column (names carried by slot).
     NOTE: carry-by-slot is only as good as slot persistence — serve re-anchoring (below)
@@ -246,7 +315,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Doubles persistent identity (isolated, opt-in)")
     ap.add_argument("match_id")
     ap.add_argument("--set", type=int, default=1)
+    ap.add_argument("--anchors", action="store_true",
+                    help="print a paste-ready per-set roster skeleton + guidance, then exit")
+    ap.add_argument("--label-frame", type=int, default=None, metavar="F",
+                    help="save data/identity_frame_F.png with quadrant labels at frame F, then exit")
     args = ap.parse_args()
+    if args.anchors:
+        set_anchors(args.match_id)
+        return
+    if args.label_frame is not None:
+        print("wrote", label_frame(args.match_id, args.label_frame))
+        return
     slot_name = resolve(args.match_id, args.set)
     print(f"set {args.set} slot -> player:")
     for slot in SLOTS:

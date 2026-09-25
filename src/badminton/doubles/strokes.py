@@ -197,8 +197,7 @@ def write(match_id: str, df: pd.DataFrame) -> int:
     """Persist as source='pipeline' rows keyed by match_id (idempotent per match).
     Shares the strokes table with singles — safe, every read filters by match_id and
     the doubles id never appears in a singles query."""
-    con = db.connect()
-    try:
+    with db.transaction() as con:
         con.execute("DELETE FROM strokes WHERE match_id=? AND source='pipeline'", [match_id])
         base = con.execute("SELECT COALESCE(MAX(stroke_id), 0) + 1 FROM strokes").fetchone()[0]
         recs = [(int(base + i), match_id, int(r.set_no), int(r.rally_id),
@@ -207,14 +206,13 @@ def write(match_id: str, df: pd.DataFrame) -> int:
                  _f(r.receiver_x), _f(r.receiver_y), float(r.hit_img_x), float(r.hit_img_y),
                  _f(r.landing_x), _f(r.landing_y), float(r.shot_type_conf), "pipeline")
                 for i, r in enumerate(df.itertuples())]
-        con.executemany(
-            "INSERT INTO strokes (stroke_id, match_id, set_no, rally_id, ball_round,"
-            " frame_num, hitter, receiver, shot_type, coord_space,"
-            " hitter_x, hitter_y, receiver_x, receiver_y, hit_x, hit_y,"
-            " landing_x, landing_y, shot_type_conf, source)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", recs)
-    finally:
-        con.close()
+        if recs:
+            con.executemany(
+                "INSERT INTO strokes (stroke_id, match_id, set_no, rally_id, ball_round,"
+                " frame_num, hitter, receiver, shot_type, coord_space,"
+                " hitter_x, hitter_y, receiver_x, receiver_y, hit_x, hit_y,"
+                " landing_x, landing_y, shot_type_conf, source)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", recs)
     return len(df)
 
 

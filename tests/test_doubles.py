@@ -201,6 +201,31 @@ def test_roles_front_is_nearest_net_on_far_side():
     assert r["front"] == "far" and r["back"] == "far2"
 
 
+def test_roles_dataframe_matches_pair_helper():
+    import pandas as pd
+    from unittest.mock import patch
+    tracks = pd.DataFrame([
+        (3, "far2", 4.0, 11.0), (1, "near", 2.0, 3.0),
+        (3, "far", 2.0, 8.0), (1, "near2", 2.0, 3.0),  # exact ties
+        (2, "near", 1.0, 5.0),  # missing partner
+        (3, "near", np.nan, np.nan), (3, "near2", 4.0, 4.0),
+        (1, "far", 2.0, 10.0), (1, "far2", 3.0, 9.0),  # diagonal tie
+    ], columns=["frame_num", "player_id", "court_x", "court_y"])
+    expected = []
+    for frame, group in tracks.groupby("frame_num"):
+        by_id = {r.player_id: r for r in group.itertuples(index=False)}
+        for side, (a, b) in (("near", roles.NEAR_SLOTS), ("far", roles.FAR_SLOTS)):
+            if a in by_id and b in by_id:
+                expected.append({"frame_num": frame, "side": side,
+                                 **roles._pair_roles(by_id[a], by_id[b])})
+    con = SimpleNamespace(execute=lambda *args: SimpleNamespace(fetch_df=lambda: tracks),
+                          close=lambda: None)
+    with patch.object(roles.db, "connect", return_value=con):
+        pd.testing.assert_frame_equal(roles.roles_df("test"), pd.DataFrame(expected))
+        tracks = tracks.iloc[:0]
+        pd.testing.assert_frame_equal(roles.roles_df("test"), pd.DataFrame())
+
+
 def test_quadrant_of():
     """Service-court quadrant: near/far split at the net (6.70), left/right at x=3.05."""
     assert identity.quadrant_of(1.0, 3.0) == "near_left"
@@ -498,11 +523,27 @@ def test_points_build_maps_rows_to_teams_and_detects_winner():
     rsides = [{"set": 1} for _ in rally_scores]
     out = points.build(rally_scores, rsides, fps=30.0, top_team="A")
     s = out["sets"][0]
-    assert s["final"] == {"a": 3, "b": 1} and s["winner"] == "A"
+    assert s["final"] == {"a": 3, "b": 1} and s["winner"] is None
     assert out["runs"]["A"] == 2          # A won rallies 1,2 back to back (then B, then A)
     # flipping top_team swaps the rows: now bottom row is team A
     flipped = points.build(rally_scores, rsides, fps=30.0, top_team="B")
-    assert flipped["sets"][0]["final"] == {"a": 1, "b": 3} and flipped["sets"][0]["winner"] == "B"
+    assert flipped["sets"][0]["final"] == {"a": 1, "b": 3} and flipped["sets"][0]["winner"] is None
+    # Completing a legal game awards it; a lead in a partially tracked game does not.
+    complete = [(i * 30, i * 30 + 9, i, 0) for i in range(1, 22)]
+    for top_team, winner in (("A", "A"), ("B", "B")):
+        result = points.build(complete, [{"set": 1}] * 21, 30.0, top_team)
+        assert result["sets"][0]["winner"] == winner
+
+
+def test_rally_server_handles_reconstructed_points():
+    from badminton.doubles import shots
+    games = [{"points": [{"rally": 1, "winner": "A"},
+                         {"rally": None, "winner": "B"},
+                         {"rally": 3, "winner": "A"},
+                         {"rally": None, "winner": "A"}]},
+             {"points": [{"rally": 4, "winner": "B"},
+                         {"rally": 5, "winner": "A"}]}]
+    assert shots.rally_server(games) == {3: "B", 5: "B"}
 
 
 def test_control_symmetric_is_half():
@@ -537,6 +578,18 @@ def test_segment_restart_truncation():
     assert [c["frame"] for c in kept] == [100, 130, 155, 190], kept
     assert segment._truncate_restarts(cs[:1]) == cs[:1]  # single contact passes through
     assert segment._truncate_restarts([]) == []
+
+
+def test_segment_merges_using_match_fps():
+    from unittest.mock import patch
+    windows = [(0, 600), (780, 1200)]  # three seconds apart at 60fps
+    with patch.object(segment, "_GATE_CACHE", {}), \
+            patch.object(segment, "_active_frames", return_value=[]), \
+            patch.object(segment, "_merge_runs", return_value=windows), \
+            patch.object(segment, "_scoreboard_live_mask", return_value=[True, True]), \
+            patch.object(segment, "_contact_trim", side_effect=lambda match, ws: ws), \
+            patch.object(segment.config, "get_match", return_value={"fps": 60}):
+        assert segment.rally_windows("test") == [(0, 1200)]
 
 
 def _run() -> int:

@@ -289,6 +289,8 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
                   start_frame: int = 0, max_frames: int | None = None,
                   device: str = "mps", imgsz: int = 1280, margin: float = 0.7,
                   stride: int = 1, conf: float = 0.25) -> int:
+    if start_frame < 0 or stride < 1 or (max_frames is not None and max_frames < 1):
+        raise ValueError("start_frame must be nonnegative; stride and max_frames must be positive")
     import cv2
     from ultralytics import YOLO
 
@@ -302,11 +304,18 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
     video = config.REPO_ROOT / m["video_path"]
 
     model = YOLO(model_name)
-    span = max_frames * stride if max_frames else 2**31
     assigner = SlotAssigner()
 
     cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        cap.release()
+        raise OSError(f"cannot open video: {video}")
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    expected_frames = max_frames
+    if total_frames > 0:
+        remaining = max(0, (total_frames - start_frame + stride - 1) // stride)
+        expected_frames = min(max_frames, remaining) if max_frames is not None else remaining
 
     rows: list[list] = []
     n_frames = 0
@@ -335,17 +344,21 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
             ])
 
     cap.release()
-    con = db.connect()
-    _ensure_match_row(con, match_id, m)        # tracks FK needs a matches row (label-free path)
-    con.execute("DELETE FROM tracks WHERE match_id=? AND frame_num>=? AND frame_num<?",
-                [match_id, start_frame, start_frame + span])
-    if rows:
-        con.executemany(
-            "INSERT INTO tracks (match_id, frame_num, player_id, court_x, court_y, "
-            "img_x, img_y, bbox, keypoints, pose_conf) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            rows,
-        )
-    con.close()
+    if not n_frames:
+        raise OSError(f"no frames decoded from {video} at frame {start_frame}")
+    if expected_frames is not None and n_frames < expected_frames:
+        raise OSError(f"incomplete video chunk: decoded {n_frames}/{expected_frames} frames from {video}")
+    with db.transaction() as con:
+        _ensure_match_row(con, match_id, m)    # tracks FK needs a matches row (label-free path)
+        # Keep existing tracks beyond the frames this run actually decoded.
+        con.execute("DELETE FROM tracks WHERE match_id=? AND frame_num>=? AND frame_num<?",
+                    [match_id, start_frame, frame_idx])
+        if rows:
+            con.executemany(
+                "INSERT INTO tracks (match_id, frame_num, player_id, court_x, court_y, "
+                "img_x, img_y, bbox, keypoints, pose_conf) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
     print(f"processed {n_frames} frames -> {len(rows)} track rows "
           f"({len(rows) / n_frames:.2f}/frame)" if n_frames else "no frames")
     return len(rows)

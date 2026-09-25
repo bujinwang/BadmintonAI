@@ -214,7 +214,8 @@ def rally_windows(match_id: str, max_gap: int = 20, min_len: int = 45,
         raw = _merge_runs(_active_frames(match_id), max_gap, min_len)
         if raw:
             mask = _scoreboard_live_mask(match_id, raw)
-            live = _merge_close([w for w, keep in zip(raw, mask) if keep])
+            fps = float(config.get_match(match_id)["fps"])
+            live = _merge_close([w for w, keep in zip(raw, mask) if keep], fps=fps)
             _GATE_CACHE[key] = [w for w in _contact_trim(match_id, live) if w is not None]
         else:
             _GATE_CACHE[key] = raw

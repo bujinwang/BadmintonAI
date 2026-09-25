@@ -42,33 +42,32 @@ def _lerp_seq(a, b, t):
 
 def fill_gaps(match_id: str, max_gap: int = 5) -> int:
     """Interpolate dropouts up to `max_gap` frames for each slot. Returns rows inserted."""
-    con = db.connect()
-    con.execute("DELETE FROM tracks WHERE match_id=? AND pose_conf < 0", [match_id])  # idempotent
-    rows_out: list[list] = []
-    for slot in SLOTS:
-        real = con.execute(
-            "SELECT frame_num, court_x, court_y, img_x, img_y, bbox, keypoints FROM tracks "
-            "WHERE match_id=? AND player_id=? AND pose_conf >= 0 ORDER BY frame_num",
-            [match_id, slot]).fetchall()
-        for (fa, *a), (fb, *b) in zip(real, real[1:]):
-            gap = fb - fa
-            if gap <= 1 or gap > max_gap + 1:           # consecutive, or too long to trust
-                continue
-            cxa, cya, ixa, iya, bba, kpa = a
-            cxb, cyb, ixb, iyb, bbb, kpb = b
-            for f in range(fa + 1, fb):
-                t = (f - fa) / gap
-                rows_out.append([
-                    match_id, f, slot,
-                    _lerp(cxa, cxb, t), _lerp(cya, cyb, t),
-                    _lerp(ixa, ixb, t), _lerp(iya, iyb, t),
-                    _lerp_seq(bba, bbb, t), _lerp_seq(kpa, kpb, t), INTERP_CONF,
-                ])
-    if rows_out:
-        con.executemany(
-            "INSERT INTO tracks (match_id, frame_num, player_id, court_x, court_y, "
-            "img_x, img_y, bbox, keypoints, pose_conf) VALUES (?,?,?,?,?,?,?,?,?,?)", rows_out)
-    con.close()
+    with db.transaction() as con:
+        con.execute("DELETE FROM tracks WHERE match_id=? AND pose_conf < 0", [match_id])  # idempotent
+        rows_out: list[list] = []
+        for slot in SLOTS:
+            real = con.execute(
+                "SELECT frame_num, court_x, court_y, img_x, img_y, bbox, keypoints FROM tracks "
+                "WHERE match_id=? AND player_id=? AND pose_conf >= 0 ORDER BY frame_num",
+                [match_id, slot]).fetchall()
+            for (fa, *a), (fb, *b) in zip(real, real[1:]):
+                gap = fb - fa
+                if gap <= 1 or gap > max_gap + 1:           # consecutive, or too long to trust
+                    continue
+                cxa, cya, ixa, iya, bba, kpa = a
+                cxb, cyb, ixb, iyb, bbb, kpb = b
+                for f in range(fa + 1, fb):
+                    t = (f - fa) / gap
+                    rows_out.append([
+                        match_id, f, slot,
+                        _lerp(cxa, cxb, t), _lerp(cya, cyb, t),
+                        _lerp(ixa, ixb, t), _lerp(iya, iyb, t),
+                        _lerp_seq(bba, bbb, t), _lerp_seq(kpa, kpb, t), INTERP_CONF,
+                    ])
+        if rows_out:
+            con.executemany(
+                "INSERT INTO tracks (match_id, frame_num, player_id, court_x, court_y, "
+                "img_x, img_y, bbox, keypoints, pose_conf) VALUES (?,?,?,?,?,?,?,?,?,?)", rows_out)
     print(f"filled {len(rows_out)} interpolated rows (max_gap={max_gap})")
     return len(rows_out)
 

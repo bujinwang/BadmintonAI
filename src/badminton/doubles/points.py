@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import argparse
 
+from ..score_seq import is_final
+
 # rally-length buckets in SECONDS (doubles rallies are short; no shot counts without strokes)
 SHORT_S, MID_S = 6.0, 12.0
 
@@ -103,7 +105,7 @@ def build(rally_scores: list[tuple], rsides: list[dict], fps: float,
         runs["A"] = max(runs["A"], _longest_run(pts, "A"))
         runs["B"] = max(runs["B"], _longest_run(pts, "B"))
         final = {"a": pts[-1]["a"], "b": pts[-1]["b"]} if pts else {"a": 0, "b": 0}
-        winner = ("A" if final["a"] > final["b"] else "B") if pts else None
+        winner = ("A" if final["a"] > final["b"] else "B") if is_final(final["a"], final["b"]) else None
         sets_out.append({"set": sn, "points": pts, "final": final, "winner": winner})
 
     return {"topTeam": top_team, "sets": sets_out, "lengthWins": length_wins,
