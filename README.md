@@ -15,25 +15,25 @@ is scored against ShuttleSet22 annotations including on a held-out match.
 
 ## Pipeline accuracy
 
-Thresholds were tuned on one match (India Open 2022 final) and tested untouched on a
-second (Denmark Open 2022 SF), so the held-out column is out-of-distribution performance.
-Ground truth: ShuttleSet22 human annotations.
+Four broadcast matches, scored against ShuttleSet22 human annotations. Thresholds were
+tuned on India Open 2022 final; **Denmark Open 2022 SF was never used for tuning** (the
+held-out column). The shot classifier is trained leave-this-match-out, so its numbers are
+held out on every match. Same figures as the site's Validation view (`showcase.json`).
 
-| Stage | Method | Tuned match | Held-out match |
-|---|---|---|---|
-| Player tracking → court metres | YOLO11x-pose + ByteTrack + homography | **0.57 m** median (1,058 strokes) | 0.64 m |
-| Shuttle tracking | TrackNetV3 (vendored, MPS-patched) | **99.8%** of labeled hit points | — |
-| Hit detection | velocity-kink ∪ direction-reversal ∪ serve-onset detectors | **F1 87.9** | F1 85.8 |
-| Hitter attribution | nearest tracked wrist | **90.0%** | 94.5% |
-| Landing position | trajectory floor point → homography | **0.55 m** median | 1.12 m |
-| Shot classification (10 classes) | pretrained BST-0 (CVPRW'26) at *detected* hits, zero fine-tuning | **72.5%** | 83.4% |
-| Rally segmentation | camera-run detection + dead-shuttle restart splitting | **F1 97.6** | F1 94.0 |
-| Score OCR | template-matched 12 px digits (self-bootstrapped from labels, transfers across tournaments) | **95.2%** score trajectory | 97.3% |
-| Per-set side mapping | "winner serves next" voting | **4/4** sets | 4/4 sets |
+| Stage | Method | India (tuned) | Denmark (held out) | AE SF | AE WS final |
+|---|---|---|---|---|---|
+| Player tracking → court metres (median error) | YOLO11x-pose + ByteTrack + homography | **0.57 m** | **0.67 m** | 0.64 m | 0.45 m |
+| Shuttle tracking | TrackNetV3 (vendored, MPS-patched) | **99.8%** of labeled hit points | — | — | — |
+| Hit detection | velocity kinks ∪ reversals ∪ serve onset ∪ wrist speed | **F1 88.8** | **F1 87.1** | F1 86.8 | F1 88.1 |
+| Hitter attribution | nearest tracked wrist | **90.4%** | **95.0%** | 88.9% | 94.5% |
+| Landing position (median error) | trajectory floor point → homography | **0.55 m** | **1.12 m** | 0.69 m | 0.40 m |
+| Shot classification (10 classes, matched contacts) | stacked HistGB: BST-0 probs + geometry + contact height | **75.7%** | **88.3%** | 80.6% | 77.4% |
+| Rally segmentation | camera runs + restart splitting + score-driven rescue | **F1 97.6** | **F1 94.0** | F1 94.2 | F1 88.2 |
+| **End to end**: labeled strokes reproduced with the right shot | the whole chain, no labels | **67.0%** | **75.1%** | 71.0% | 69.7% |
 
-End-to-end, the label-free chain reproduces 84.5% / 79.5% of labeled strokes with ~96%
-hitter agreement, so the same analytics code produces near-identical output from either
-source.
+Of the strokes the chain finds (86–90% of all labeled strokes), 96–99% are attributed to the
+right player, and the scoreboard decoder reproduces every set's final score exactly on all
+four matches.
 
 ## Dashboard
 
@@ -114,7 +114,7 @@ cached from then on.
 ```
 broadcast.mp4 ──► YOLO11 pose + ByteTrack ──► tracks (court metres, validated ±0.57 m)
        │                                          │
-       └──► TrackNetV3 ──► shuttle track ──► hit detection ──► BST-0 shot classes
+       └──► TrackNetV3 ──► shuttle track ──► hit detection ──► stacked shot classifier
                                 │                 │
                        rally segmentation   landings (floor-point → homography)
                                 │                 │
