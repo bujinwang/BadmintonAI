@@ -35,3 +35,36 @@ jobs:
 
       - name: Doubles (slot identity, roles, segmentation, sets)
         run: PYTHONPATH=src python tests/test_doubles.py
+
+      - name: Accuracy, storage safety, and exported coverage
+        run: |
+          PYTHONPATH=src python tests/test_accuracy.py
+          PYTHONPATH=src python tests/test_storage.py
+          PYTHONPATH=src python tests/test_export_quality.py
+          PYTHONPATH=src python tests/test_clip_refresh.py
+          python tests/test_web_server.py
+          PYTHONPATH=src python tests/test_review_eval.py
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: node tests/data-loader.cjs
+      - run: node tests/court-accessibility.cjs
+      - name: Coaching feature logic
+        run: |
+          node tests/sequences.cjs
+          node tests/playback.cjs
+          node tests/profiles.cjs
+          node tests/review.cjs
+          node tests/review-storage.cjs
+      - run: npm run build

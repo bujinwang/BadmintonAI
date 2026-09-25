@@ -8,6 +8,43 @@ lives in `docs/` and the inline docstrings; this file is the map + the hard-won 
 > `claude/badminton-analytics-improvements-svr9p2`, and it lists what still has to be run
 > on a machine that has the DuckDB (the web bundles are a `export_web` behind the fix).
 
+**2026-09-07 local improvements (uncommitted):** See
+[`docs/ACCURACY_IMPROVEMENTS.md`](docs/ACCURACY_IMPROVEMENTS.md) and
+[`docs/RELIABILITY_IMPROVEMENTS.md`](docs/RELIABILITY_IMPROVEMENTS.md).
+Deciding-set evaluation now uses per-rally sides; SF's old 77.8% hitter score was
+a measurement bug (96.1% with unchanged predictions). Wrist recovery and refreshed
+leave-one-match-out stacks improve pooled shot recovery 69.82% → 70.36%; all final
+scores remain exact. Database replacements are atomic, sparse validation preserves
+continuous tracks, and doubles roles run ~117× faster with exact output parity.
+Doubles web scores are refreshed to 17–21 / 21–16 / 27–25. Film room URLs now carry
+filters/selections with history and retryable replay loading; Validation exposes
+missing/extra rallies and joint hitter-plus-shot accuracy. Node 22 is pinned in
+`web/.nvmrc`; Python safety/accuracy tests and web checks are included in CI.
+Stack caches now fingerprint source/config/weight metadata (old files remain);
+track/label data corrections still require explicit cache removal. To refresh
+annotated clips after inference changes, use `scripts/render_web_clips.py --force`.
+
+**2026-09-07 coaching features (uncommitted):** Singles Film adds consecutive-shot
+search anywhere in a rally (`sequence`, `starter`, `contact`, `through` URL parameters),
+contact seeking, playback rates and exchange loops. `RallyInspector` owns the native
+video clock; `Replay2D` optionally consumes it. Clip filenames supply the padded frame
+origin. Raw YouTube keeps separate court controls. `/players/` pools exact player
+identities across singles matches, with weighted counts, source isolation, missing-data
+coverage and evidence links. Pure feature checks live in `web/tests/`; see
+[`web/README.md`](web/README.md) for browser checks and URL details.
+
+**2026-09-07 accuracy review (uncommitted):** Singles `/review/` reuses synchronized
+playback and adds an uncertainty/disagreement queue, browser-local corrections,
+validated import/export, cross-tab locks, and recoverable drafts. Review JSON retains
+original predictions and roster identities; no DB or model writes. Labels now export
+`meta.contactFrameOffset` because their Stroke.f is player-track time (+6), while
+contact comparison needs per-match shuttle timing (−1/−3). Review aligns with that
+explicit correction; older exports without it cannot produce reference comparisons.
+`python -m badminton.review_eval` compares candidate exports against explicitly
+held-out reviewed samples and rejects declared training overlap. See `web/README.md`
+for commands and the sample/coverage limitations. Review, storage, evaluator and
+browser regressions are under `web/tests/` and `tests/test_review_eval.py`.
+
 ---
 
 ## 1. What this is
@@ -19,7 +56,74 @@ surfaces movement + tactics + pressure analytics, plus rally video clips (raw & 
 **Direction (locked):** controlled-capture eventually (any decent camera) · analytics
 dashboard first → tactical commentary later · singles first → doubles later.
 
-## 2. Current status (as of 2026-08-13)
+## 2. Current status (as of 2026-08-30)
+
+- **PHASE-2 ACCURACY STEP-CHANGE SHIPPED (2026-08-30 pm): stacked shot classifier +
+  wrist-fused hit detection; BST fine-tune validated (not deployed).** End-to-end shot
+  accuracy: **india 61.1→66.6, denmark 65.8→75.4, ae_sf 64.1→69.6, ws_final 67.8→69.8**
+  (coverage 85–89%, all snapshots/exports/web rebuilt, showcase.json refreshed, tests
+  19/19 + 48/48).
+  - **Wrist-fused hits (`hits._wrist_hits`, 4th pass in detect_hits):** 86–89% of missed
+    hits were far-side (soft kinks: drop/net/block) or serves, and 79–87% of them show a
+    wrist-speed peak. A ≥`WRIST_PK` px/f wrist peak with the raw shuttle track within
+    `WRIST_SH_PX` is a contact. Recall india 86.7→89.9, denmark 81.7→87.5 (F1 88.5/87.2);
+    attribution + segmentation F1 unchanged. NOTE: doubles segmentation shares
+    detect_hits — its rally windows may shift on the next doubles refresh.
+  - **Stacked classifier (`pipeline.classify` + `pipeline.stack_training_frame`):**
+    HistGB over geometry features + estimated contact height + PRETRAINED BST-0 canonical
+    class probs, trained leave-this-match-out. **THE LESSON THAT COST A DAY-PART: train
+    on DEPLOY-STYLE features** — at detected hits with detection noise — not on
+    labeled-frame features (labeled-frame training scored 85.7% on labeled frames yet
+    67% deployed, UNDER the 72.5% BST argmax it replaced). Deploy-style training rows are
+    cached at `data/cache/stack_train_<match>.parquet` — **DELETE those caches whenever
+    detect_hits/thresholds/features change**, they bake the old behavior in.
+  - **BST fine-tune (validated upgrade, parked):** fresh 20-class head (2 sides × 10 EN)
+    on the pretrained backbone, trained on OUR CV inputs. Held-out per fold: india 85.6 /
+    denmark 89.2 / ae 80.1 / ws 78.4 (mean 83.3 vs 76.8 pretrained argmax) — but feeding
+    FT probs into the stack adds only +0.4 over pretrained probs, so the stack ships with
+    pretrained. Weights + fold probs + scripts + README: `data/models/bst_ft/`.
+  - **Doubles re-track relaunched** (`caffeinate -i scripts/run_doubles_track.sh`) with
+    the slot-identity fixes — resumable 20k chunks; after it lands, verify teleport
+    counts in showcase and run `scripts/refresh_doubles.sh wtf_2024_md_sf`.
+  - Known remaining: ae_sf hitter/side accuracy 77.8% (tight camera framing — BST side
+    fails there; NEXT_SESSION §5.5), ae_sf sets 2–3 still carry 3 spurious segments.
+
+- **PHASE-1 QUICK WINS SHIPPED (2026-08-30): score-driven segmentation rescue, serve-parity
+  winner fusion, CV contact height, pose lateness.** Four coupled upgrades, all validated:
+  - **Contact height (`contact.py`, NEW):** metric shuttle height at every pipeline contact
+    with NO 3D — the hitter is the ruler (`(ground_py − shuttle_py) × 1.78 m /
+    standing_bbox_px(depth)`, standing = 80th-pct bbox height binned by bbox-bottom y).
+    **81.9% agreement with ShuttleSet's binary hit_height @ 1.55 m** (per match 79/81/82/87),
+    by-shot medians perfectly ordered (lob 0.71 → net 0.96 → drive 1.46 → drop 1.94 → clear
+    1.98 → smash 2.18 m). Backfilled into `strokes.contact_height_m` (pipeline rows, singles);
+    `labelfree.stroke_df` now emits real `hit_height` bands + real `low_contact` in pressure.
+    DON'T relearn: ShuttleSet `hit_x/hit_y` is a floor-plane click (≈ prev landing) with NO
+    height signal; window-max shuttle sampling grabs the incoming arc's apex (67%).
+  - **Serve-parity fusion (`score_seq.confirm_winner` + labelfree fill pass):** an OCR-less
+    rally's winner is filled when TWO independent geometric signals agree — who serves next
+    (rule 11.2) and which court they serve from (rule 9.1 parity, 96.3%). Guards: a fill may
+    never exceed the decoded set final, and a negative delta at the next real reading reverts
+    the whole span (an unguarded fill shipped india set 2 as 21-18 — caught by validate).
+    Winners assigned: india 83/84, ae_sf 103/105; score-aligned winner agreement 94–97%.
+  - **Score-driven segmentation rescue (`labelfree.hole_intervals` +
+    `segment.rescue_windows`, wired into `pipeline --label-free`):** an orphan OCR event (no
+    rally to bind to) certifies a missed rally in a known window; re-search it with relaxed
+    gates, BUDGETED by each set's `rallies_missing` deficit (un-budgeted rescue invented 5
+    spurious denmark rallies from binding-greed orphans — the budget is load-bearing).
+    Workflow per match: `pipeline --label-free --no-rescue --write` → `labelfree --build`
+    (clean deficit) → `pipeline --label-free --write` → `labelfree --build`. **Deficit went
+    16 missing rallies → 2** (denmark {0,0}, ws_final 10→{1,0} with 9 rescued, ae_sf set 1
+    5→1). Remaining: ae_sf sets 2-3 carry 3 pre-existing SPURIOUS segments (negative
+    missing) — a drop pass is future work.
+  - **Lateness (`insights.lateness_stats`) + contact bands (`insights.contact_stats`):**
+    arrival margin = when the hitter settled within 0.75 m of the contact (track's own
+    endpoint — measuring vs the labeled position injects its ~0.5 m error and goes negative).
+    Finding: these players' error-enders carry LARGER margins than winners (0.9 vs 0.3 s
+    ai-india) — errors are mostly comfortable misses, consistent with the forced/unforced
+    split. Both stats export per source (labels = human bands, ai = CV) into two new
+    Patterns cards ("Contact height", "Late to the shot"); headless-verified on both toggles.
+  - Tests **19/19** (`test_score_seq`, +confirm_winner) + **48/48** doubles; snapshots
+    regenerated (all set finals still exact 4/4); `export_web --skip-slow` + `next build` run.
 
 - **SCORELINES FIXED — RULE-CONSTRAINED SCORE DECODING (2026-08-13, `score_seq.py`).**
   Every AI scoreline on the dashboard was wrong. The score was being read per rally and
@@ -229,6 +333,7 @@ Everything is partitioned by `match_id`. The dashboard reads a **Match** from th
 |---|---|
 | `court.py` | coordinate frame, homography apply, `which_half`, `in_court` |
 | `score_seq.py` | **rule-constrained score decoder** (pure; shared by singles + doubles, like `court`/`config`). `repair` drops self-contradicting readings (the 0/8 spike), `expand` splits a multi-point jump into the one-point rallies it really was, `complete` finishes a game the broadcast cut away from (21 / win by 2 / cap 30, ≤3 fabricated points). `point_log` = all three; `set_finals`/`sets_won` read it off. `serve_court_parity` = the free geometric parity bit on the server's score (server vs RECEIVER, 96.3% vs labels — never server vs centre line, 74%). |
+| `contact.py` | **contact-height estimation** — metric shuttle height at contact via the person-ruler (no 3D). 81.9% vs ShuttleSet hit_height bands @1.55 m; fills `strokes.contact_height_m` (`backfill`, called by `pipeline.write_strokes`); `HIGH_M` = the above/below-tape threshold. ShuttleSet hit_x/y has NO height signal (floor click). |
 | `db.py` | DuckDB connect (`read_only` param), `init_db` from schema |
 | `config.py` | load/save `config/matches.yaml` |
 | `fetch_video.py` | yt-dlp download + frame grab |
