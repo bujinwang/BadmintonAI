@@ -36,11 +36,11 @@ function SideCard({ team, f, pair }: { team: Team; f: FlowSide; pair: string }) 
   const fmtS = (v: number | null) => (v != null ? `${v.toFixed(1)}s` : "—");
   return (
     <Card>
-      <div className="flex items-baseline justify-between gap-2">
-        <div className="font-semibold text-[1.05rem]" style={{ color }}>
+      <div className="flex items-baseline justify-between gap-2 flex-wrap">
+        <div className="font-semibold text-[1.05rem] min-w-0" style={{ color }}>
           {pair}
         </div>
-        <span className="mono text-[10px] tracking-[0.16em] text-dim">TEAM {team}</span>
+        <span className="mono text-[10px] tracking-[0.16em] text-dim shrink-0">TEAM {team}</span>
       </div>
       <AttackFirstBar color={color} f={f} />
       <div className="grid grid-cols-2 gap-x-4 gap-y-3 mt-4">
@@ -49,7 +49,7 @@ function SideCard({ team, f, pair }: { team: Team; f: FlowSide; pair: string }) 
         <Metric label="ROTATIONS" value={f.rotPerRally ?? "—"} size="text-[1.5rem]" sub="per rally (debounced)" />
         <Metric label="ROTATION RATE" value={f.rotPerMin != null ? f.rotPerMin.toFixed(1) : "—"} size="text-[1.5rem]" sub="per minute of play" />
       </div>
-      <div className="mt-4 pt-3 border-t border-[var(--line-soft)] flex items-center gap-4 text-[12px]">
+      <div className="mt-4 pt-3 border-t border-[var(--line-soft)] flex items-center gap-x-4 gap-y-1.5 flex-wrap text-[12px]">
         <span className="mono text-dim">TRANSITIONS</span>
         <span className="flex items-center gap-1.5">
           <span style={{ color }}>{f.a2d}</span>

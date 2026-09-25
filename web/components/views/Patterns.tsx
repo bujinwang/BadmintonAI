@@ -283,6 +283,93 @@ export default function Patterns({ d, src, goFilm }: ViewProps) {
           )}
         </Card>
       </section>
+
+      {(insights.contactHeight || insights.lateness) && <div className="rule" />}
+
+      <section className="grid lg:grid-cols-2 gap-4 [&>*]:min-w-0">
+        {insights.contactHeight && (
+          <Card>
+            <Section
+              kicker="PRESSURE ZONES"
+              title="Contact height"
+              hint="Share of shots taken above the net tape. Above the tape you can hit down and attack; below it you can only lift or block. Errors taken below the tape were pressure-born."
+            />
+            <div className="space-y-4 mt-2">
+              {(["B", "A"] as P[]).map((p) => {
+                const v = insights.contactHeight![p];
+                return (
+                  <div key={p}>
+                    <div className="flex items-baseline justify-between mb-1">
+                      <span className="text-[13.5px] font-semibold" style={{ color: PCOLOR[p] }}>
+                        {names[p]}
+                      </span>
+                      <span className="mono text-[11px] text-dim">
+                        {v.high_pct}% above the tape
+                        {v.med_m != null && ` · median ${v.med_m} m`}
+                      </span>
+                    </div>
+                    <div className="flex h-4 rounded overflow-hidden">
+                      <div style={{ width: `${v.high_pct}%`, background: "var(--win)", opacity: 0.8 }} />
+                      <div style={{ width: `${100 - v.high_pct}%`, background: "var(--line-soft)" }} />
+                    </div>
+                    {v.n_err >= 5 && (
+                      <div className="mono text-[10.5px] text-dim mt-1">
+                        {v.err_low_pct}% of their rally-ending errors were below-tape contacts
+                        <span className="text-mut"> ({v.n_err} rated)</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <p className="text-dim text-[11.5px]">
+                {src === "ai"
+                  ? "CV estimate: shuttle track height over the hitter, scaled by their own body height (82% agreement with human above/below-net labels)."
+                  : "Human-labeled above/below-net contact per stroke."}
+              </p>
+            </div>
+          </Card>
+        )}
+
+        {insights.lateness && (
+          <Card>
+            <Section
+              kicker="ARRIVAL MARGIN"
+              title="Late to the shot"
+              hint="How long before contact the player settled at the shot, from the pose tracks. Under 0.25 s = hit on the run / at full stretch."
+            />
+            <div className="space-y-4 mt-2">
+              {(["B", "A"] as P[]).map((p) => {
+                const v = insights.lateness![p];
+                return (
+                  <div key={p}>
+                    <div className="flex items-baseline justify-between mb-1">
+                      <span className="text-[13.5px] font-semibold" style={{ color: PCOLOR[p] }}>
+                        {names[p]}
+                      </span>
+                      <span className="mono text-[11px] text-dim">
+                        {v.rushed_all_pct}% of shots hit on the run
+                      </span>
+                    </div>
+                    <div className="flex h-4 rounded overflow-hidden">
+                      <div style={{ width: `${v.rushed_all_pct}%`, background: "var(--warn)", opacity: 0.85 }} />
+                      <div style={{ width: `${100 - v.rushed_all_pct}%`, background: "var(--line-soft)" }} />
+                    </div>
+                    {v.med_err != null && v.med_win != null && (
+                      <div className="mono text-[10.5px] text-dim mt-1">
+                        median margin {v.med_all}s · on error-enders {v.med_err}s · on winners {v.med_win}s
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <p className="text-dim text-[11.5px]">
+                A big margin on errors means comfortable misses (focus, not footwork);
+                a small one means the opponent earned them with placement.
+              </p>
+            </div>
+          </Card>
+        )}
+      </section>
     </div>
   );
 }

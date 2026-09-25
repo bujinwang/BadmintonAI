@@ -30,6 +30,8 @@ export interface Meta {
   date: string;
   youtubeId: string | null;
   fps: number;
+  /** Add to exported stroke.f to align contact references (labels use player-track timing). */
+  contactFrameOffset?: number;
   sets: { set: number; a: number; b: number }[];
   winner: P;
   totals: { rallies: number; shots: number; rallySecs: number; points: Record<P, number> };
@@ -118,6 +120,15 @@ export interface Insights {
   shotMix: { p: P; shot: string; n: number; pct: number }[];
   pressureByShot: Record<string, number>;
   pressureSummary: Record<P, { faced: number; applied: number; n: number }>;
+  contactHeight?: Record<P, {
+    n: number; high_pct: number; n_err: number; err_low_pct: number;
+    med_m: number | null;
+  }>;
+  lateness?: Record<P, {
+    n: number; n_err: number;
+    med_all: number | null; med_err: number | null; med_win: number | null;
+    rushed_all_pct: number; rushed_err_pct: number;
+  }>;
 }
 
 export interface Heat {
@@ -182,10 +193,13 @@ export interface Showcase {
   tracking: { medianM: number; p90M: number; n: number; nearM: number; farM: number };
   agreement: {
     nLabel: number; nPipeline: number; nMatched: number;
-    coverage: number; hitterAcc: number; shotAcc: number; e2e: number;
+    coverage: number; hitterAcc: number | null; shotAcc: number | null; e2e: number;
+    jointE2e?: number;
+    precision?: number;
     confusion: { label: string; pred: string; n: number }[];
-    recall: { shot: string; recall: number; n: number }[];
+    recall: { shot: string; recall: number | null; n: number; nLabel?: number; overallRecall?: number }[];
   };
+  rallyCoverage?: { set: number; expected: number; detected: number; missing: number; unknownWinners: number }[];
   ocr: {
     events: OcrEvent[];
     rowA: "top" | "bot";

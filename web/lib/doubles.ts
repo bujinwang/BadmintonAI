@@ -2,11 +2,11 @@
 
    The doubles dashboard is a SEPARATE surface (route /d/<id>, manifest doubles_index.json)
    so the singles dashboard is untouched and this whole layer stays deletable. Kept
-   self-contained — its own small client-fetch hook rather than coupling to lib/data.ts. */
+   self-contained — only the schema-free JSON transport is shared. */
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useJson } from "./json";
 import type { Heat } from "@/lib/types";
 
 export type DSide = "near" | "far";
@@ -131,7 +131,7 @@ export interface PlayerMovement {
 
 /** one accepted point in the OCR score trajectory */
 export interface ScorePoint {
-  rally: number;
+  rally: number | null;
   a: number;
   b: number;
   winner: Team;
@@ -338,43 +338,6 @@ export const SLOTS_OF: Record<DSide, [DSlot, DSlot]> = {
   near: ["near", "near2"],
   far: ["far", "far2"],
 };
-
-// ── client fetch (cache + dedupe), mirroring lib/data.ts but standalone ──
-const cache = new Map<string, unknown>();
-const inflight = new Map<string, Promise<unknown>>();
-
-function fetchJson<T>(url: string): Promise<T> {
-  if (cache.has(url)) return Promise.resolve(cache.get(url) as T);
-  if (!inflight.has(url)) {
-    inflight.set(
-      url,
-      fetch(url).then(async (r) => {
-        if (!r.ok) throw new Error(`${r.status} ${url}`);
-        const j = await r.json();
-        cache.set(url, j);
-        inflight.delete(url);
-        return j;
-      }),
-    );
-  }
-  return inflight.get(url) as Promise<T>;
-}
-
-function useJson<T>(url: string | null): { data: T | null; error: string | null } {
-  const [data, setData] = useState<T | null>(url && cache.has(url) ? (cache.get(url) as T) : null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    if (!url) return;
-    let on = true;
-    fetchJson<T>(url)
-      .then((d) => on && setData(d))
-      .catch((e) => on && setError(String(e)));
-    return () => {
-      on = false;
-    };
-  }, [url]);
-  return { data, error };
-}
 
 export const useDoublesIndex = () => useJson<DoublesIndex>("/data/doubles_index.json");
 

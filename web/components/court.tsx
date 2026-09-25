@@ -90,7 +90,7 @@ export function PlacementMap({
         {m.kind === "winner" ? "★ winner" : m.kind === "error" ? "✕ error" : "●"}
       </span>{" "}
       {m.label} · set {m.set} rally {m.rally}
-      <span className="text-dim"> · click to watch</span>
+      {onPick && <span className="text-dim"> · select to watch</span>}
     </span>
   );
   return (
@@ -103,8 +103,17 @@ export function PlacementMap({
             <g
               key={i}
               transform={`translate(${m.x * K},${m.y * K})`}
+              role={onPick ? "button" : undefined}
+              tabIndex={onPick ? 0 : undefined}
+              aria-label={`Set ${m.set}, rally ${m.rally}: ${m.kind === "rally" ? "rally shot" : m.kind}, ${m.label}${onPick ? ". Watch rally" : ""}`}
+              onKeyDown={onPick ? (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onPick(m.set, m.rally);
+                }
+              } : undefined}
               onClick={() => onPick?.(m.set, m.rally)}
-              className="cursor-pointer"
+              className={onPick ? "cursor-pointer" : undefined}
               {...on(tipFor(m))}
             >
               <circle r={6} fill="transparent" />
@@ -117,8 +126,17 @@ export function PlacementMap({
             <g
               key={`e${i}`}
               transform={`translate(${m.x * K},${m.y * K})`}
+              role={onPick ? "button" : undefined}
+              tabIndex={onPick ? 0 : undefined}
+              aria-label={`Set ${m.set}, rally ${m.rally}: ${m.kind === "rally" ? "rally shot" : m.kind}, ${m.label}${onPick ? ". Watch rally" : ""}`}
+              onKeyDown={onPick ? (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onPick(m.set, m.rally);
+                }
+              } : undefined}
               onClick={() => onPick?.(m.set, m.rally)}
-              className="cursor-pointer"
+              className={onPick ? "cursor-pointer" : undefined}
               {...on(tipFor(m))}
             >
               <circle r={9} fill="transparent" />
@@ -285,12 +303,18 @@ export function Replay2D({
   rep,
   ai,
   onFrame,
+  frame: controlledFrame,
+  hideControls = false,
 }: {
   rep: ReplayT;
   ai: boolean;
   onFrame?: (f: number) => void;
+  frame?: number;
+  hideControls?: boolean;
 }) {
-  const [frame, setFrame] = useState(rep.f0);
+  const [internalFrame, setFrame] = useState(rep.f0);
+  const controlled = controlledFrame != null;
+  const frame = controlledFrame ?? internalFrame;
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
   const raf = useRef<number>(0);
@@ -313,7 +337,7 @@ export function Replay2D({
   }, [rep]);
 
   useEffect(() => {
-    if (!playing) return;
+    if (controlled || !playing) return;
     const step = (t: number) => {
       if (!tPrev.current) tPrev.current = t;
       const df = ((t - tPrev.current) / 1000) * rep.fps * speed;
@@ -330,7 +354,7 @@ export function Replay2D({
       cancelAnimationFrame(raf.current);
       tPrev.current = 0;
     };
-  }, [playing, speed, rep, onFrame]);
+  }, [controlled, playing, speed, rep, onFrame]);
 
   const pos = (side: Side): [number, number] | null => {
     for (let f = frame; f >= frame - 8; f--) {
@@ -347,7 +371,7 @@ export function Replay2D({
   const done = rep.hits.filter((h) => h.f <= frame).length;
 
   return (
-    <div>
+    <div data-frame={frame} data-playback={controlled ? "video" : "standalone"}>
       <svg {...courtSvgProps(false, 1.0)} className="w-full">
         <CourtLines />
         {(["near", "far"] as Side[]).map((side) => {
@@ -403,8 +427,9 @@ export function Replay2D({
         )}
       </svg>
 
-      <div className="flex items-center gap-2 mt-2">
+      {!hideControls && !controlled && <div className="flex flex-wrap items-center gap-2 mt-2">
         <button
+          aria-label={playing ? "Pause replay" : "Play replay"}
           onClick={() => setPlaying(!playing)}
           className="mono text-[11px] px-2.5 py-1 rounded border border-[var(--line)] text-ink hover:border-[var(--mut)]"
         >
@@ -413,6 +438,8 @@ export function Replay2D({
         {[0.5, 1, 2].map((s) => (
           <button
             key={s}
+            aria-label={`Playback speed ${s} times`}
+            aria-pressed={speed === s}
             onClick={() => setSpeed(s)}
             className="mono text-[10.5px] px-2 py-1 rounded border"
             style={{
@@ -424,6 +451,8 @@ export function Replay2D({
           </button>
         ))}
         <input
+          aria-label="Replay position"
+          aria-valuetext={`${((frame - rep.f0) / rep.fps).toFixed(1)} seconds of ${((rep.f1 - rep.f0) / rep.fps).toFixed(1)} seconds`}
           type="range"
           min={rep.f0} max={rep.f1} value={frame}
           onChange={(e) => {
@@ -432,12 +461,12 @@ export function Replay2D({
             setFrame(fRef.current);
             onFrame?.(fRef.current);
           }}
-          className="flex-1 accent-[var(--ai)] h-1"
+          className="flex-1 min-w-0 accent-[var(--ai)] h-1"
         />
-        <span className="mono text-[10.5px] text-dim w-24 text-right">
+        <span className="mono text-[10.5px] text-dim shrink-0 text-right">
           {done}/{rep.hits.length} shots
         </span>
-      </div>
+      </div>}
     </div>
   );
 }

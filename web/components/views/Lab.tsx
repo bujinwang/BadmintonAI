@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import type { ViewProps } from "@/components/Dashboard";
 import { AiTag, Card, Metric, Section, Select, useChartTip } from "@/components/ui";
 import { Confusion, HBars, OcrStairs } from "@/components/charts";
@@ -11,16 +12,15 @@ import type { Replay } from "@/lib/types";
 import { SHOT_ORDER } from "@/lib/types";
 
 export default function Lab({ d, id, src }: ViewProps) {
-  const { data: sc } = useShowcase(id);
+  const { data: sc, error, retry } = useShowcase(id);
   const { meta, rallies } = d;
 
   const [ralKey, setRalKey] = useState<string>(() => {
     const r = rallies.reduce((best, r) => (r.shots > best.shots ? r : best), rallies[0]);
-    return `${r.set}-${r.rally}`;
+    return r ? `${r.set}-${r.rally}` : "";
   });
-  const [setN, ralN] = ralKey.split("-").map(Number);
-  const rep = useReplay(id, src, setN, ralN);
-  const sel = rallies.find((r) => r.set === setN && r.rally === ralN);
+  const sel = rallies.find((r) => `${r.set}-${r.rally}` === ralKey) ?? rallies[0];
+  const rep = useReplay(id, src, sel?.set ?? null, sel?.rally ?? null);
 
   const stages = useMemo(() => {
     if (!sc) return [];
@@ -30,58 +30,72 @@ export default function Lab({ d, id, src }: ViewProps) {
         tech: "YOLO11x-pose + ByteTrack + homography",
         metric: `${sc.tracking.medianM} m`,
         sub: `median position error vs ${sc.tracking.n} labeled strokes (near ${sc.tracking.nearM} / far ${sc.tracking.farM})`,
+        vs: "≈ the annotators' own click noise",
       },
       {
         name: "SHUTTLE TRACKING",
         tech: "TrackNetV3, full broadcast",
-        metric: "99.8%",
-        sub: "of labeled hit points detected (India Open, 980 strokes)",
+        metric: "2D trajectory",
+        sub: "Shuttle positions in broadcast pixels, including detection gaps",
+        vs: "Screen coordinates do not measure shuttle height or 3D flight",
       },
       sc.hits && {
         name: "HIT DETECTION",
-        tech: "velocity kinks + reversals + serve onset",
+        tech: "velocity kinks + serve onset + wrist motion",
         metric: `F1 ${(sc.hits.f1 * 100).toFixed(1)}`,
         sub: `P ${(sc.hits.precision * 100).toFixed(0)} / R ${(sc.hits.recall * 100).toFixed(0)} ±6 frames · attribution ${(sc.hits.attribution * 100).toFixed(0)}% · landings ${sc.hits.landingMedM ?? "—"} m median`,
+        vs: "Precision counts false contacts; recall counts missed labeled contacts",
       },
       {
         name: "SHOT CLASSIFICATION",
-        tech: "BST-0 (CVPRW'26), zero fine-tuning",
-        metric: `${((sc.agreement.shotAcc ?? 0) * 100).toFixed(0)}%`,
+        tech: "BST-0 + geometry + contact-height stack",
+        metric: sc.agreement.shotAcc == null ? "—" : `${(sc.agreement.shotAcc * 100).toFixed(1)}%`,
         sub: `on hits matched to labels (${sc.agreement.nMatched}) · 10 shot classes`,
+        vs: "Trained on other matches at detected contacts; missed hits are excluded here",
       },
       sc.segmentation && {
         name: "RALLY SEGMENTATION",
-        tech: "camera runs + restart splitting",
+        tech: "camera runs + restart splitting + score rescue",
         metric: `F1 ${(sc.segmentation.f1 * 100).toFixed(1)}`,
         sub: `${sc.segmentation.nDet} detected vs ${sc.segmentation.nLabel} labeled rallies`,
+        vs: "Compare the score-derived rally counts below to see remaining gaps",
       },
       {
         name: "SCORE OCR",
         tech: "template-matched 12 px digits",
         metric: `${sc.ocr.events.length} events`,
-        sub: "score trajectory 95–97% vs labels · side map 8/8 across both matches",
+        sub: "Score changes read from this broadcast, repaired using scoring rules",
+        vs: "A correct final score does not guarantee each rally winner is correct",
       },
-    ].filter(Boolean) as { name: string; tech: string; metric: string; sub: string }[];
+    ].filter(Boolean) as {
+      name: string;
+      tech: string;
+      metric: string;
+      sub: string;
+      vs: string;
+    }[];
   }, [sc]);
 
   return (
     <div className="space-y-10">
+      <div className="card px-4 py-3 flex flex-wrap items-center gap-3 text-[13px]">
+        <p className="text-mut">Inspect uncertain contacts and reference disagreements, then save a separate review record.</p>
+        <Link href={`/m/${id}/ai/review/`} className="ml-auto shrink-0 text-[var(--ai)] underline underline-offset-4">Open accuracy review →</Link>
+      </div>
+      {error && <div role="alert" className="card p-5">
+        <p className="text-err">Couldn’t load validation data.</p>
+        <button onClick={retry} className="mt-3 rounded border border-[var(--line)] px-3 py-1.5">Try again</button>
+      </div>}
+      {!sc && !error && <p role="status" className="mono text-mut">Loading validation data…</p>}
       <section>
         <Section
           kicker="THE LABEL-FREE CHAIN"
           title="Pipeline stages"
           hint={
-            sc?.heldOut
-              ? "Every threshold in this chain was tuned on the India Open match — this match is fully held out, so the numbers below are out-of-distribution performance."
-              : "Each stage validated against ShuttleSet22 human labels on this match."
+            "Saved validation against ShuttleSet22 human labels. The shot classifier excludes this match from training; detection thresholds and upstream models have separate validation histories."
           }
         >
           <AiTag text="VALIDATION" />
-          {sc?.heldOut && (
-            <span className="mono text-[10px] tracking-[0.15em] px-1.5 py-0.5 rounded border border-[var(--warn)]/50 text-warn">
-              HELD-OUT MATCH
-            </span>
-          )}
         </Section>
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {stages.map((s, i) => (
@@ -93,6 +107,10 @@ export default function Lab({ d, id, src }: ViewProps) {
                 {s.metric}
               </div>
               <div className="text-[11.5px] text-mut mt-1 leading-snug">{s.sub}</div>
+              <div className="text-[11px] text-dim mt-2 pt-2 border-t border-[var(--line-soft)] leading-snug">
+                <span className="mono text-[9.5px] tracking-[0.16em] mr-1.5">IN CONTEXT</span>
+                {s.vs}
+              </div>
               <div className="mono text-[10px] text-dim mt-2">{s.tech}</div>
               {i < stages.length - 1 && (
                 <div className="absolute right-2 top-1/2 -translate-y-1/2 text-dim text-[18px] hidden lg:block">
@@ -104,6 +122,21 @@ export default function Lab({ d, id, src }: ViewProps) {
         </div>
       </section>
 
+      {!!sc?.rallyCoverage?.length && <section>
+        <Section kicker="CHECK THE DENOMINATOR" title="How much of the match was recovered?"
+          hint="Each point requires one rally. Compare detected rally windows with the decoded final score. Matching counts alone do not prove that the right rallies were found." />
+        <div className="grid sm:grid-cols-3 gap-3">
+          {sc.rallyCoverage.map((s) => <Card key={s.set}>
+            <div className="kicker mb-2">SET {s.set}</div>
+            <Metric label="RALLIES DETECTED / POINTS" value={`${s.detected} / ${s.expected}`} size="text-[1.8rem]" />
+            <p className="text-[13px] mt-3" style={{ color: s.missing ? "var(--warn)" : "var(--mut)" }}>
+              {s.missing > 0 ? `${s.missing} missing ${s.missing === 1 ? "rally" : "rallies"}` : s.missing < 0 ? `${-s.missing} extra ${s.missing === -1 ? "window" : "windows"}` : "Rally count matches the score"}
+            </p>
+            <p className="text-[12px] text-mut mt-1">{s.unknownWinners} {s.unknownWinners === 1 ? "winner" : "winners"} still unknown</p>
+          </Card>)}
+        </div>
+      </section>}
+
       <div className="rule" />
 
       {/* rally x-ray */}
@@ -111,12 +144,12 @@ export default function Lab({ d, id, src }: ViewProps) {
         <Section
           kicker="ONE RALLY"
           title="Rally breakdown"
-          hint="One rally, synchronized views: the broadcast, the machine-tracked court, and the raw shuttle trajectory with every detected contact. Yellow = machine; dashed gray = human label, where one exists."
+          hint="Inspect the same rally in the broadcast, tracked court, and shuttle trajectory. Each player has separate playback controls. Yellow = machine; dashed gray = human label, where one exists."
         />
         <div className="max-w-xs mb-3">
           <Select
             label="RALLY"
-            value={ralKey}
+            value={sel ? `${sel.set}-${sel.rally}` : ""}
             onChange={setRalKey}
             options={rallies.map((r) => `${r.set}-${r.rally}`)}
           />
@@ -126,10 +159,13 @@ export default function Lab({ d, id, src }: ViewProps) {
             <div className="kicker mb-2">FOOTAGE — TOGGLE “AI OVERLAY” IN THE NAVBAR FOR THE FULLY ANNOTATED FEED</div>
             {sel && <RallyVideo rally={sel} youtubeId={meta.youtubeId} />}
             <div className="kicker mt-4 mb-2">WHAT THE MACHINE SEES — 2D COURT</div>
-            {rep.data ? (
-              <Replay2D rep={rep.data} ai />
+            {rep.error ? <div role="alert" className="text-[13px] py-6">
+              <p>Couldn’t load this rally’s tracking.</p>
+              <button onClick={rep.retry} className="mt-2 rounded border border-[var(--line)] px-3 py-1.5">Try again</button>
+            </div> : rep.data ? (
+              <Replay2D key={`${id}-${src}-${sel?.set}-${sel?.rally}`} rep={rep.data} ai />
             ) : (
-              <div className="text-dim mono text-[12px] py-10 text-center animate-pulse">LOADING…</div>
+              <div role="status" className="text-dim mono text-[12px] py-10 text-center">{sel ? "Loading rally…" : "No rallies available."}</div>
             )}
           </Card>
           <Card className="rise-2">
@@ -138,7 +174,12 @@ export default function Lab({ d, id, src }: ViewProps) {
               {rep.data?.refHits.length ? " · ┊ HUMAN LABEL" : ""}
             </div>
             {rep.data && <Trajectory rep={rep.data} />}
-            <div className="mt-3 space-y-1.5">
+            {rep.data && (
+              <div className="kicker mt-4 mb-2">
+                {rep.data.hits.length} DETECTED CONTACTS — SCROLL
+              </div>
+            )}
+            <div className="mt-1 space-y-1.5 max-h-[300px] overflow-y-auto pr-1">
               {rep.data?.hits.map((h) => (
                 <div key={h.f} className="flex items-center gap-2 text-[12px]">
                   <span className="mono text-[10.5px] text-dim w-16">f{h.f}</span>
@@ -225,16 +266,16 @@ export default function Lab({ d, id, src }: ViewProps) {
                 sub={`${sc.agreement.nMatched}/${sc.agreement.nLabel} labeled strokes`} accent="var(--ai)" />
             </Card>
             <Card delay={2}>
-              <Metric label="WHO HIT IT" value={`${((sc.agreement.hitterAcc ?? 0) * 100).toFixed(1)}%`}
+              <Metric label="WHO HIT IT" value={sc.agreement.hitterAcc == null ? "—" : `${(sc.agreement.hitterAcc * 100).toFixed(1)}%`}
                 sub="hitter agreement on matched" accent="var(--ai)" />
             </Card>
             <Card delay={3}>
-              <Metric label="SHOT TYPE" value={`${((sc.agreement.shotAcc ?? 0) * 100).toFixed(1)}%`}
+              <Metric label="SHOT TYPE" value={sc.agreement.shotAcc == null ? "—" : `${(sc.agreement.shotAcc * 100).toFixed(1)}%`}
                 sub="10-class agreement on matched" accent="var(--ai)" />
             </Card>
             <Card delay={4}>
-              <Metric label="END TO END" value={`${(sc.agreement.e2e * 100).toFixed(1)}%`}
-                sub="coverage × shot agreement" accent="var(--ai)" />
+              <Metric label="FULL STROKE ACCURACY" value={sc.agreement.jointE2e == null ? "—" : `${(sc.agreement.jointE2e * 100).toFixed(1)}%`}
+                sub="found + correct hitter + correct shot, out of all labeled strokes" accent="var(--ai)" />
             </Card>
           </div>
           <div className="grid lg:grid-cols-2 gap-4 [&>*]:min-w-0">
@@ -243,11 +284,12 @@ export default function Lab({ d, id, src }: ViewProps) {
               <Confusion cells={sc.agreement.confusion} order={SHOT_ORDER} />
             </Card>
             <Card className="self-start">
-              <div className="kicker mb-3">PER-CLASS RECALL</div>
+              <div className="kicker mb-3">{sc.agreement.recall.every((r) => r.overallRecall != null)
+                ? "SHOT RECOVERY — INCLUDING MISSED CONTACTS" : "SHOT RECALL — ON MATCHED CONTACTS"}</div>
               <HBars
                 rows={[...sc.agreement.recall]
-                  .sort((a, b) => b.recall - a.recall)
-                  .map((r) => ({ label: r.shot, value: r.recall }))}
+                  .sort((a, b) => (b.overallRecall ?? b.recall ?? 0) - (a.overallRecall ?? a.recall ?? 0))
+                  .map((r) => ({ label: r.shot, value: r.overallRecall ?? r.recall ?? 0 }))}
                 color="var(--ai)"
                 format={(v) => `${(v * 100).toFixed(0)}%`}
               />
@@ -289,16 +331,25 @@ function Trajectory({ rep }: { rep: Replay }) {
   return (
     <div className="relative" ref={ref}>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+        {/* Contact rules sit BEHIND the traces and are drawn as rail ticks with only a
+            whisper of a full-height line — a long rally has 40+ of them and solid rules
+            at full opacity bury the very trajectories they annotate. */}
         {rep.refHits.map((h) => (
           <line key={`r${h.f}`} x1={x(h.f)} y1={pad - 6} x2={x(h.f)} y2={H - pad}
-            stroke="var(--ref-tick)" strokeDasharray="3 4" />
+            stroke="var(--ref-tick)" strokeDasharray="2 5" opacity={0.5} />
         ))}
         {rep.hits.map((h) => (
-          <line key={`d${h.f}`} x1={x(h.f)} y1={pad - 6} x2={x(h.f)} y2={H - pad}
-            stroke="var(--ai)" strokeWidth={1.6} opacity={0.85} />
+          <g key={`d${h.f}`}>
+            <line x1={x(h.f)} y1={pad - 6} x2={x(h.f)} y2={H - pad}
+              stroke="var(--ai)" strokeWidth={1} opacity={0.16} />
+            <line x1={x(h.f)} y1={pad - 6} x2={x(h.f)} y2={pad + 7}
+              stroke="var(--ai)" strokeWidth={1.6} opacity={0.95} />
+            <line x1={x(h.f)} y1={H - pad - 7} x2={x(h.f)} y2={H - pad}
+              stroke="var(--ai)" strokeWidth={1.6} opacity={0.95} />
+          </g>
         ))}
-        <path d={seg(1, yx)} fill="none" stroke="var(--trace-x)" strokeWidth={1.6} />
-        <path d={seg(2, yy)} fill="none" stroke="var(--trace-y)" strokeWidth={1.6} />
+        <path d={seg(1, yx)} fill="none" stroke="var(--trace-x)" strokeWidth={1.8} />
+        <path d={seg(2, yy)} fill="none" stroke="var(--trace-y)" strokeWidth={1.8} />
         {/* invisible wide hover targets over the hit rules */}
         {rep.refHits.map((h) => (
           <line key={`rh${h.f}`} x1={x(h.f)} y1={pad - 6} x2={x(h.f)} y2={H - pad}

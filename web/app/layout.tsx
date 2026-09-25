@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Archivo, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
+import { AUTHOR, LINKS, SITE_URL } from "@/lib/site";
 
 const archivo = Archivo({
   variable: "--font-archivo",
@@ -14,10 +15,27 @@ const plexMono = IBM_Plex_Mono({
   subsets: ["latin"],
 });
 
+const DESC =
+  "Coach-grade badminton match analytics from raw broadcast video — player tracking, shuttle tracking, shot classification and score OCR, with a fully label-free AI mode.";
+
 export const metadata: Metadata = {
-  title: "COURTSIDE: badminton match analytics",
-  description:
-    "Badminton match analytics from broadcast video: player tracking, shuttle tracking, shot classification and score OCR, with a fully label-free AI mode.",
+  metadataBase: new URL(SITE_URL),
+  title: "COURTSIDE — badminton match intelligence",
+  description: DESC,
+  authors: [{ name: AUTHOR, url: LINKS.site }],
+  openGraph: {
+    type: "website",
+    siteName: "COURTSIDE",
+    title: "COURTSIDE — badminton match intelligence",
+    description: DESC,
+    images: [{ url: "/og.png", width: 1200, height: 630, alt: "COURTSIDE" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "COURTSIDE — badminton match intelligence",
+    description: DESC,
+    images: ["/og.png"],
+  },
 };
 
 export default function RootLayout({

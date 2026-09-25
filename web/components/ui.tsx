@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useRef, useState, type MouseEvent, type FocusEvent, type ReactNode } from "react";
 import Link from "next/link";
 import type { P } from "@/lib/types";
 import { PCOLOR } from "@/lib/fmt";
@@ -113,6 +113,7 @@ export function Pills<T extends string>({
         return (
           <button
             key={o}
+            aria-pressed={on}
             onClick={() => onChange(o)}
             className="px-2.5 py-1 rounded-full text-[12px] border transition-colors"
             style={{
@@ -145,6 +146,7 @@ export function Select({
     <label className="flex flex-col gap-1 min-w-0">
       <span className="kicker">{label}</span>
       <select
+        aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="bg-[var(--panel-solid)] border border-[var(--line)] rounded-md px-2 py-1.5 text-[13px] text-ink outline-none focus:border-[var(--mut)]"
@@ -210,10 +212,19 @@ export function useChartTip() {
     setTip({ x, y: e.clientY - r.top, node });
   };
   const hide = () => setTip(null);
+  const focus = (node: ReactNode) => (e: FocusEvent) => {
+    const r = ref.current?.getBoundingClientRect();
+    if (!r) return;
+    const target = e.currentTarget.getBoundingClientRect();
+    const x = Math.min(Math.max(target.left + target.width / 2 - r.left, 78), Math.max(r.width - 78, 78));
+    setTip({ x, y: target.top - r.top, node });
+  };
   const on = (node: ReactNode) => ({
     onMouseEnter: show(node),
     onMouseMove: show(node),
     onMouseLeave: hide,
+    onFocus: focus(node),
+    onBlur: hide,
   });
   const tipEl = tip ? (
     <Tip x={tip.x} y={tip.y} below={tip.y < 64}>

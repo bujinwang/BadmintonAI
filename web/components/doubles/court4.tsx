@@ -204,7 +204,9 @@ export function DoublesReplay2D({ rep }: { rep: DoublesReplay }) {
           return (
             <div
               key={side}
-              className="flex-1 flex items-center justify-between px-3 py-1.5 rounded-md border"
+              /* min-w-0 so the truncate on the pair name can actually engage — without it
+                 the flex item refuses to shrink below the name's min-content width */
+              className="flex-1 min-w-0 flex items-center justify-between gap-2 px-3 py-1.5 rounded-md border"
               style={{ borderColor: "var(--line)" }}
             >
               <span className="mono text-[10px] tracking-[0.14em] truncate max-w-[60%]"
@@ -259,9 +261,10 @@ function Controls({
 }) {
   const pct = Math.round((100 * (frame - rep.f0)) / Math.max(1, rep.f1 - rep.f0));
   return (
-    <div className="flex items-center gap-2 mt-2">
+    <div className="flex flex-wrap items-center gap-2 mt-2">
       <button
-        onClick={() => setPlaying(!playing)}
+        aria-label={playing ? "Pause replay" : "Play replay"}
+          onClick={() => setPlaying(!playing)}
         className="mono text-[11px] px-2.5 py-1 rounded border border-[var(--line)] text-ink hover:border-[var(--mut)]"
       >
         {playing ? "❚❚" : "▶"}
@@ -269,7 +272,9 @@ function Controls({
       {[0.5, 1, 2].map((s) => (
         <button
           key={s}
-          onClick={() => setSpeed(s)}
+          aria-label={`Playback speed ${s} times`}
+            aria-pressed={speed === s}
+            onClick={() => setSpeed(s)}
           className="mono text-[10.5px] px-2 py-1 rounded border"
           style={{
             borderColor: speed === s ? "var(--mut)" : "var(--line)",
@@ -280,12 +285,16 @@ function Controls({
         </button>
       ))}
       <input
-        type="range"
+        aria-label="Replay position"
+          aria-valuetext={`${((frame - rep.f0) / rep.fps).toFixed(1)} seconds of ${((rep.f1 - rep.f0) / rep.fps).toFixed(1)} seconds`}
+          type="range"
         min={rep.f0}
         max={rep.f1}
         value={frame}
         onChange={(e) => onScrub(Number(e.target.value))}
-        className="flex-1 accent-[var(--ai)] h-1"
+        /* min-w-0: a range input's intrinsic width (~170px) otherwise pins this row's
+           min-content and pushes the whole card past a phone viewport */
+        className="flex-1 min-w-0 accent-[var(--ai)] h-1"
       />
       <span className="mono text-[10.5px] text-dim w-10 text-right">{pct}%</span>
     </div>

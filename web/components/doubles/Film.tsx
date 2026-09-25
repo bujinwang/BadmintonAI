@@ -17,10 +17,11 @@ export default function DoublesFilm({ d, id, goRally }: DoublesViewProps) {
     return ids.includes(rallyParam) ? rallyParam : (ids[0] ?? 1);
   }, [rallyParam, d.rallies]);
 
-  const { data: rep, error } = useDoublesReplay(id, rally);
+  const { data: rep, error, retry } = useDoublesReplay(id, d.rallies.length ? rally : null);
   const meta = d.meta;
   const multiSet = meta.nSets > 1;
   const row = d.rallies.find((r) => r.rally === rally);
+  const selectedIndex = d.rallies.findIndex((r) => r.rally === rally);
   // team occupying each court side this rally (geometric near/far → fixed team A/B)
   const teamOf = (side: DSide): Team =>
     side === "near" ? row?.nearPair ?? "A" : row?.farPair ?? "B";
@@ -51,6 +52,8 @@ export default function DoublesFilm({ d, id, goRally }: DoublesViewProps) {
                   <button
                     key={r.rally}
                     onClick={() => goRally(r.rally)}
+                    aria-current={on ? "true" : undefined}
+                    aria-label={`Set ${sn}, rally ${r.rally}`}
                     title={`rally ${r.rally} · ${fmtClock(r.durS)}`}
                     className="px-2 py-1 rounded text-[11px] border transition-colors mono"
                     style={{
@@ -69,10 +72,23 @@ export default function DoublesFilm({ d, id, goRally }: DoublesViewProps) {
         })}
       </div>
 
-      <div className="grid lg:grid-cols-[minmax(0,380px)_1fr] gap-5 items-start">
+      {row ? (
+        <div className="flex flex-wrap items-center gap-3 mono text-[11px]">
+          <button disabled={selectedIndex <= 0} onClick={() => goRally(d.rallies[selectedIndex - 1].rally)}
+            className="rounded border border-[var(--line)] px-3 py-2 disabled:opacity-40 disabled:cursor-default">← Previous rally</button>
+          <span className="text-mut" role="status">Set {row.set} · Rally {row.rally} · {selectedIndex + 1} / {d.rallies.length}</span>
+          <button disabled={selectedIndex >= d.rallies.length - 1} onClick={() => goRally(d.rallies[selectedIndex + 1].rally)}
+            className="rounded border border-[var(--line)] px-3 py-2 disabled:opacity-40 disabled:cursor-default">Next rally →</button>
+        </div>
+      ) : <p className="text-mut" role="status">No rally replays are available for this match.</p>}
+
+      <div className="grid lg:grid-cols-[minmax(0,380px)_1fr] gap-5 items-start [&>*]:min-w-0">
         <Card>
-          {error && <div className="text-err text-[13px]">Failed to load replay: {error}</div>}
-          {!rep && !error && (
+          {error && <div className="text-err text-[13px]" role="alert">
+            Failed to load replay: {error}
+            <button onClick={retry} className="block mt-3 underline underline-offset-4">Retry replay</button>
+          </div>}
+          {row && !rep && !error && (
             <div className="py-24 text-center text-dim mono text-[12px] animate-pulse">
               LOADING REPLAY…
             </div>

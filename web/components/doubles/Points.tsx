@@ -64,13 +64,25 @@ function Worm({
           <g
             key={i}
             transform={`translate(${x(q.played)},${y(q.lead)})`}
-            className="cursor-pointer"
+            className={q.p.rally != null ? "cursor-pointer" : undefined}
+            role={q.p.rally != null ? "button" : "img"}
+            tabIndex={0}
+            aria-label={`Set ${set.set}, score ${q.p.a}–${q.p.b}: ${q.p.rally != null ? `watch rally ${q.p.rally}` : "reconstructed point, no matched rally"}`}
             onMouseEnter={() => setTip({ x: (x(q.played) / W) * 100, y: (y(q.lead) / H) * 100, p: q.p })}
             onMouseLeave={() => setTip(null)}
-            onClick={() => onPick(q.p.rally)}
+            onFocus={() => setTip({ x: (x(q.played) / W) * 100, y: (y(q.lead) / H) * 100, p: q.p })}
+            onBlur={() => setTip(null)}
+            onClick={q.p.rally != null ? () => onPick(q.p.rally!) : undefined}
+            onKeyDown={(e) => {
+              if (q.p.rally != null && (e.key === "Enter" || e.key === " ")) {
+                e.preventDefault();
+                onPick(q.p.rally);
+              }
+            }}
           >
             <circle r={9} fill="transparent" />
-            <circle r={4.2} fill={TEAM_COLOR[q.p.winner]} stroke="var(--contact-ink)" strokeWidth={0.7} />
+            <circle r={4.2} fill={q.p.rally != null ? TEAM_COLOR[q.p.winner] : "var(--panel-solid)"}
+              stroke={q.p.rally != null ? "var(--contact-ink)" : TEAM_COLOR[q.p.winner]} strokeWidth={1} />
           </g>
         ))}
         {set.points.length > 0 && (
@@ -96,7 +108,7 @@ function Worm({
                 {finish[String(tip.p.rally)].team !== tip.p.winner && " (didn't come back)"}
               </div>
             )}
-            <div className="text-dim mt-0.5">click to watch</div>
+            <div className="text-dim mt-0.5">{tip.p.rally != null ? "Open to watch" : "Reconstructed point · no matched rally"}</div>
           </div>
         </div>
       )}
@@ -230,7 +242,7 @@ export default function DoublesPoints({ d, goRally }: DoublesViewProps) {
         <Section
           kicker="SCORE FLOW"
           title="How each game was won"
-          hint="The lead, point by point, read off the broadcast scoreboard. Above the centre line one team leads; below, the other. Each dot is a point — click to watch that rally."
+          hint="The lead, point by point, decoded from the scoreboard. Filled dots link to tracked rallies. Hollow dots are reconstructed points without a matched rally."
         />
         <div className="grid lg:grid-cols-3 gap-5">
           {p.sets.map((s) => (

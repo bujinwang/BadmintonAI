@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useIndex, useMatch } from "@/lib/data";
 import { useOverlayPref } from "@/lib/overlay";
 import type { MatchData, Source } from "@/lib/types";
@@ -12,8 +12,10 @@ import CourtView from "@/components/views/CourtView";
 import Patterns from "@/components/views/Patterns";
 import Film from "@/components/views/Film";
 import Lab from "@/components/views/Lab";
+import Review from "@/components/views/Review";
 import ThemeToggle from "@/components/ThemeToggle";
 import { ViewPager } from "@/components/ui";
+import SiteFooter from "@/components/SiteFooter";
 
 const TABS: [string, string][] = [
   ["overview", "Overview"],
@@ -21,7 +23,8 @@ const TABS: [string, string][] = [
   ["court", "Court"],
   ["patterns", "Patterns"],
   ["film", "Film room"],
-  ["lab", "AI Lab"],
+  ["lab", "Validation"],
+  ["review", "Review"],
 ];
 
 export interface ViewProps {
@@ -33,11 +36,10 @@ export interface ViewProps {
 }
 
 export default function Dashboard({ id, src, view }: { id: string; src: Source; view: string }) {
-  const { data: d, error } = useMatch(id, src);
+  const { data: d, error, retry } = useMatch(id, src);
   const { data: idx } = useIndex();
   const router = useRouter();
   const pathname = usePathname();
-  const sp = useSearchParams();
 
   const entry = idx?.matches.find((m) => m.id === id);
   const hasBoth = (entry?.sources.length ?? 0) > 1;
@@ -51,7 +53,7 @@ export default function Dashboard({ id, src, view }: { id: string; src: Source; 
     router.push(`/m/${id}/${src}/film/?r=${set}-${rally}`);
   };
 
-  /* Ordered walk-through for a first-time visitor: home → the six views → the picker. */
+  /* Ordered walk-through for a first-time visitor: home → the seven views → the picker. */
   const steps: [string, string][] = [
     ["/", "Home"],
     ...TABS.map(([v, label]) => [`/m/${id}/${src}/${v}/`, label] as [string, string]),
@@ -72,6 +74,7 @@ export default function Dashboard({ id, src, view }: { id: string; src: Source; 
             return (
               <Link
                 key={v}
+                aria-current={on ? "page" : undefined}
                 href={`/m/${id}/${src}/${v}/`}
                 className="px-3 py-1.5 rounded-md text-[13.5px] transition-colors whitespace-nowrap"
                 style={{
@@ -93,6 +96,7 @@ export default function Dashboard({ id, src, view }: { id: string; src: Source; 
           })}
         </div>
         <button
+          aria-pressed={overlayOn}
           onClick={() => setOverlayOn(!overlayOn)}
           className="ml-auto mono text-[10.5px] tracking-[0.12em] px-2.5 py-1.5 rounded-md border transition-colors shrink-0"
           style={{
@@ -111,7 +115,8 @@ export default function Dashboard({ id, src, view }: { id: string; src: Source; 
               return (
                 <Link
                   key={s}
-                  href={`${pathname.replace(`/${src}/`, `/${s}/`)}${sp.size ? `?${sp.toString()}` : ""}`}
+                  aria-current={on ? "true" : undefined}
+                  href={`${pathname.replace(`/${src}/`, `/${s}/`)}`}
                   className="px-3 py-1.5 transition-colors"
                   style={{
                     background: on ? (s === "ai" ? "var(--ai)" : "var(--ink)") : "transparent",
@@ -128,21 +133,53 @@ export default function Dashboard({ id, src, view }: { id: string; src: Source; 
         <ThemeToggle />
       </nav>
 
+      {/* The source toggle is the whole point of the project, and two buttons in the top-right
+          don't say so. Each mode states what it is and points at the other one. */}
       {src === "ai" && (
-        <div className="mt-4 mb-1 px-4 py-2 rounded-md border border-[var(--ai)]/30 text-[13px] flex items-center gap-3 rise">
+        <div className="mt-4 mb-1 px-4 py-2.5 rounded-md border border-[var(--ai)]/30 text-[13px] flex items-center gap-x-3 gap-y-1.5 flex-wrap rise">
           <span className="mono text-[10px] tracking-[0.18em] text-[var(--ai)] font-semibold shrink-0">
             AI VISION
           </span>
           <span className="text-mut">
             Every number on this page was inferred from the broadcast video — player tracking,
-            shuttle tracking, hit detection, shot classification and score OCR. No human labels.
+            shuttle tracking, hit detection, shot classification and score OCR. No rally labels required at inference.
           </span>
+          <Link
+            href="/how/"
+            className="ml-auto shrink-0 text-dim hover:text-ink transition-colors whitespace-nowrap"
+          >
+            how it works →
+          </Link>
+        </div>
+      )}
+
+      {src === "labels" && hasBoth && (
+        <div className="mt-4 mb-1 px-4 py-2.5 rounded-md border border-[var(--line)] text-[13px] flex items-center gap-x-3 gap-y-1.5 flex-wrap rise">
+          <span className="mono text-[10px] tracking-[0.18em] text-mut font-semibold shrink-0">
+            GROUND TRUTH
+          </span>
+          <span className="text-mut">
+            This page is built from ShuttleSet22&apos;s human annotations — the reference the
+            pipeline is graded against.
+          </span>
+          <Link
+            href={`${pathname.replace(`/${src}/`, "/ai/")}`}
+            className="ml-auto shrink-0 mono text-[10.5px] tracking-[0.12em] px-2.5 py-1 rounded border transition-colors whitespace-nowrap"
+            style={{
+              borderColor: "var(--ai)",
+              color: "var(--ai)",
+              background: "var(--ai-soft)",
+            }}
+          >
+            REBUILD THIS PAGE FROM VIDEO →
+          </Link>
         </div>
       )}
 
       {error && (
         <div className="card p-6 mt-6 text-err text-[14px]">
           Failed to load match data: {error}
+          <button onClick={retry} className="block mt-3 underline underline-offset-4">Retry match data</button>
         </div>
       )}
 
@@ -161,7 +198,9 @@ export default function Dashboard({ id, src, view }: { id: string; src: Source; 
           {view === "patterns" && <Patterns d={d} id={id} src={src} goFilm={goFilm} goRally={goRally} />}
           {view === "film" && <Film d={d} id={id} src={src} goFilm={goFilm} goRally={goRally} />}
           {view === "lab" && <Lab d={d} id={id} src={src} goFilm={goFilm} goRally={goRally} />}
+          {view === "review" && <Review d={d} id={id} src={src} goFilm={goFilm} goRally={goRally} />}
           <ViewPager steps={steps} current={stepIx < 0 ? 0 : stepIx} />
+          <SiteFooter />
         </>
       )}
     </main>
@@ -173,7 +212,7 @@ function ScoreHeader({ d }: { d: MatchData }) {
   return (
     <header className="rise flex items-center gap-x-6 gap-y-2 flex-wrap py-5">
       <div className="disp text-[1.6rem] font-semibold leading-none" style={{ color: "var(--pa)" }}>
-        {meta.players.A} <span className="text-gold-400" style={{ color: "var(--gold)" }}>🏆</span>
+        <Link href={`/players/?player=${encodeURIComponent(meta.players.A)}&source=${meta.source}`} title={`View ${meta.players.A} profile`} className="hover:underline underline-offset-4">{meta.players.A}</Link> <span className="text-gold-400" style={{ color: "var(--gold)" }}>🏆</span>
       </div>
       <div className="flex gap-2">
         {meta.sets.map((s) => (
@@ -186,7 +225,7 @@ function ScoreHeader({ d }: { d: MatchData }) {
         ))}
       </div>
       <div className="disp text-[1.6rem] font-semibold leading-none" style={{ color: "var(--pb)" }}>
-        {meta.players.B}
+        <Link href={`/players/?player=${encodeURIComponent(meta.players.B)}&source=${meta.source}`} title={`View ${meta.players.B} profile`} className="hover:underline underline-offset-4">{meta.players.B}</Link>
       </div>
       <div className="text-dim text-[12.5px] mono ml-auto">
         {meta.tournament} · {meta.round} · {meta.totals.shots.toLocaleString()} shots ·{" "}

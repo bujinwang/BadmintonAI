@@ -10,7 +10,7 @@ import { useState } from "react";
 import type { DoublesViewProps } from "@/components/DoublesDashboard";
 import type { DSide, DSlot } from "@/lib/doubles";
 import { SIDE_OF, useDoublesReplay } from "@/lib/doubles";
-import { AiTag, Card, Metric, Section, Select } from "@/components/ui";
+import { AiTag, Card, Section, Select } from "@/components/ui";
 import { DoublesReplay2D, DoublesVideo } from "@/components/doubles/court4";
 
 const SIDE_COLOR: Record<DSide, string> = { near: "var(--pa)", far: "var(--pb)" };
@@ -18,22 +18,13 @@ const SIDE_COLOR: Record<DSide, string> = { near: "var(--pa)", far: "var(--pb)" 
 export default function DoublesLab({ d, id }: DoublesViewProps) {
   const { showcase: sc, meta, rallies } = d;
   const [rally, setRally] = useState<number>(rallies[0]?.rally ?? 1);
-  const { data: rep } = useDoublesReplay(id, rally);
-  const row = rallies.find((r) => r.rally === rally);
-
-  if (!sc) {
-    return (
-      <Card className="mt-6">
-        <p className="text-mut text-[13px]">No validation data — re-run the doubles export.</p>
-      </Card>
-    );
-  }
-
-  const steps = sc.slots.map((s) => s.medStepCm).filter((x): x is number => x != null);
+  const row = rallies.find((r) => r.rally === rally) ?? rallies[0];
+  const { data: rep, error, retry } = useDoublesReplay(id, row?.rally ?? null);
+  const steps = (sc?.slots ?? []).map((s) => s.medStepCm).filter((x): x is number => x != null);
   const medStep = steps.length ? steps.reduce((a, b) => a + b, 0) / steps.length : null;
-  const teleTotal = sc.slots.reduce((a, s) => a + s.teleports, 0);
+  const teleTotal = (sc?.slots ?? []).reduce((a, s) => a + s.teleports, 0);
 
-  const stages: { name: string; tech: string; metric: string; sub: string }[] = [
+  const stages: { name: string; tech: string; metric: string; sub: string }[] = sc ? [
     {
       name: "PLAYER TRACKING",
       tech: "YOLO11x-pose + ByteTrack + homography",
@@ -64,15 +55,19 @@ export default function DoublesLab({ d, id }: DoublesViewProps) {
       metric: "✓ parity",
       sub: "per-rally OCR parities match the hand-read score; corrects between-rally swaps",
     },
-  ];
+  ] : [];
 
   return (
     <div className="space-y-10 mt-2">
+      {!sc && <Card>
+        <p className="text-mut text-[13px]" role="status">Validation measurements are not available for this match.</p>
+      </Card>}
+      {sc && <>
       <section>
         <Section
           kicker="THE LABEL-FREE DOUBLES CHAIN"
           title="Label-free validation"
-          hint="No public doubles dataset exists and the one SOTA paper hand-annotated just two matches — so this pipeline trains on nothing. Every stage is checked on its own terms: tracking coverage, identity stability and rally segmentation, all measured straight from the tracks."
+          hint="This match has no human stroke annotations in the project. Tracking coverage, identity stability and rally segmentation are measured from the saved tracks; these checks do not establish shot-classification accuracy."
         >
           <AiTag text="VALIDATION" />
           <span className="mono text-[10px] tracking-[0.15em] px-1.5 py-0.5 rounded border border-[var(--ai)]/40 text-[var(--ai)]">
@@ -103,8 +98,10 @@ export default function DoublesLab({ d, id }: DoublesViewProps) {
           title="Tracking quality by player"
           hint="Recall = share of rally frames each slot was tracked — the far pair is smaller and more occluded, so it trails. Median step is the typical per-frame court move (low = smooth). ID jumps are non-physical >1.5 m hops between adjacent frames — the identity-switch failure mode the doubles literature flags."
         />
-        <Card className="!p-0 overflow-hidden">
-          <table className="w-full text-[13px]">
+        {/* the 5-column table can't shrink below its min-content on a phone — scroll it
+            inside the card instead of letting it clip (or stretch the page) */}
+        <Card className="!p-0 overflow-x-auto">
+          <table className="w-full text-[13px] min-w-[440px]">
             <thead>
               <tr className="text-left text-dim mono text-[10px] tracking-[0.1em] border-b border-[var(--line-soft)]">
                 <th className="px-4 py-2.5">PLAYER</th>
@@ -147,40 +144,48 @@ export default function DoublesLab({ d, id }: DoublesViewProps) {
 
       <div className="rule" />
 
+      </>}
       <section>
         <Section
           kicker="ONE RALLY"
           title="Rally breakdown"
           hint="The same rally two ways: the AI-annotated broadcast (4-player pose, names, roles, formation and the machine-read score baked in) beside the 2D reconstruction in true court metres. Front player solid, rear ringed. No labels were used to produce any of it."
         />
-        <div className="max-w-xs mb-3">
+        {row ? <div className="max-w-xs mb-3">
           <Select
             label="RALLY"
-            value={String(rally)}
+            value={String(row.rally)}
             onChange={(v) => setRally(Number(v))}
             options={rallies.map((r) => String(r.rally))}
           />
-        </div>
-        <div className="grid lg:grid-cols-2 gap-5 items-start">
+        </div> : <p role="status" className="text-mut text-[13px]">No rally replays are available for this match.</p>}
+        {/* min-w-0: grid items default to min-width:auto, so the mono caption strings
+            below stretch the column past the viewport on a phone */}
+        <div className="grid lg:grid-cols-2 gap-5 items-start [&>*]:min-w-0">
           {row && (
             <Card>
               <div className="kicker mb-2">AI-ANNOTATED BROADCAST</div>
               <DoublesVideo row={row} youtubeId={meta.youtubeId} />
             </Card>
           )}
-          <Card>
+          {row && <Card>
             <div className="kicker mb-2">2D RECONSTRUCTION — CV TRACKS</div>
-            {rep ? (
+            {error ? (
+              <div className="text-[13px] py-10 text-center" role="alert">
+                <p className="text-err">Replay could not load.</p>
+                <button onClick={retry} className="mt-3 rounded border border-[var(--line)] px-3 py-1.5">Retry replay</button>
+              </div>
+            ) : rep ? (
               <DoublesReplay2D rep={rep} />
             ) : (
-              <div className="text-dim mono text-[12px] py-16 text-center animate-pulse">LOADING RALLY…</div>
+              <div role="status" className="text-dim mono text-[12px] py-16 text-center animate-pulse">LOADING RALLY…</div>
             )}
             <div className="mt-3 text-[11.5px] text-dim flex flex-wrap gap-x-5 gap-y-1">
               <span style={{ color: "var(--pa)" }}>● {meta.teams.A}</span>
               <span style={{ color: "var(--pb)" }}>● {meta.teams.B}</span>
               <span>solid = net (front) player · ring = rear cover</span>
             </div>
-          </Card>
+          </Card>}
         </div>
       </section>
     </div>

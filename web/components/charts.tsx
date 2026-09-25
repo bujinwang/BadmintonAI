@@ -62,8 +62,19 @@ export function Worm({
             key={i}
             transform={`translate(${x(p.pt)},${y(p.lead)})`}
             className="cursor-pointer"
+            role="button"
+            tabIndex={0}
+            aria-label={`Watch set ${p.r.set}, rally ${p.r.rally}: ${p.r.a}–${p.r.b}, ${p.r.endPhrase}`}
             onMouseEnter={() => setTip({ x: (x(p.pt) / W) * 100, y: (y(p.lead) / H) * 100, r: p.r })}
             onMouseLeave={() => setTip(null)}
+            onFocus={() => setTip({ x: (x(p.pt) / W) * 100, y: (y(p.lead) / H) * 100, r: p.r })}
+            onBlur={() => setTip(null)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onPick(p.r.set, p.r.rally);
+              }
+            }}
             onClick={() => onPick(p.r.set, p.r.rally)}
           >
             {/* generous invisible hit area for hover/click */}
@@ -131,9 +142,12 @@ export function Diverging({
         <div key={r.shot} className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 text-[12px]">
           <div className="flex justify-end items-center gap-1.5">
             {r.e > 0 && <span className="mono text-err text-[11px]">{r.e}</span>}
-            <div
+            <button
+              type="button"
+              disabled={!onPick || !r.e}
+              aria-label={`Watch ${r.e} ${r.shot} errors`}
               className="h-4 rounded-l-sm cursor-pointer hover:opacity-80"
-              style={{ width: `${(100 * r.e) / max}%`, background: "var(--err)", minWidth: r.e ? 3 : 0 }}
+              style={{ width: `${(100 * r.e) / Math.max(max, 1)}%`, background: "var(--err)", minWidth: r.e ? 3 : 0 }}
               onClick={() => onPick?.(r.shot, false)}
               {...on(
                 <span>
@@ -145,9 +159,12 @@ export function Diverging({
           </div>
           <div className="w-28 text-center text-mut truncate">{r.shot}</div>
           <div className="flex items-center gap-1.5">
-            <div
+            <button
+              type="button"
+              disabled={!onPick || !r.w}
+              aria-label={`Watch ${r.w} ${r.shot} winners`}
               className="h-4 rounded-r-sm cursor-pointer hover:opacity-80"
-              style={{ width: `${(100 * r.w) / max}%`, background: "var(--win)", minWidth: r.w ? 3 : 0 }}
+              style={{ width: `${(100 * r.w) / Math.max(max, 1)}%`, background: "var(--win)", minWidth: r.w ? 3 : 0 }}
               onClick={() => onPick?.(r.shot, true)}
               {...on(
                 <span>

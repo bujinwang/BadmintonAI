@@ -8,6 +8,7 @@ import { fmtClock } from "@/lib/fmt";
 import { useOverlayPref } from "@/lib/overlay";
 import { AiTag, ViewPager } from "@/components/ui";
 import ThemeToggle from "@/components/ThemeToggle";
+import SiteFooter from "@/components/SiteFooter";
 import DoublesOverview from "@/components/doubles/Overview";
 import DoublesPoints from "@/components/doubles/Points";
 import DoublesMovement from "@/components/doubles/Movement";
@@ -21,7 +22,7 @@ const TABS: [string, string][] = [
   ["court", "Court"],
   ["patterns", "Patterns"],
   ["film", "Film room"],
-  ["lab", "AI Lab"],
+  ["lab", "Validation"],
 ];
 
 export interface DoublesViewProps {
@@ -31,10 +32,13 @@ export interface DoublesViewProps {
 }
 
 export default function DoublesDashboard({ id, view }: { id: string; view: string }) {
-  const { data: d, error } = useDoublesMatch(id);
+  const { data: d, error, retry } = useDoublesMatch(id);
   const router = useRouter();
   const [overlayOn, setOverlayOn] = useOverlayPref();
-  const goRally = (rally: number) => router.push(`/d/${id}/film/?r=${rally}`);
+  const goRally = (rally: number) => {
+    if (view === "film") window.history.pushState(null, "", `?r=${rally}`);
+    else router.push(`/d/${id}/film/?r=${rally}`, { scroll: false });
+  };
 
   /* Ordered walk-through for a first-time visitor: home → the six views → the picker. */
   const steps: [string, string][] = [
@@ -56,6 +60,7 @@ export default function DoublesDashboard({ id, view }: { id: string; view: strin
             return (
               <Link
                 key={v}
+                aria-current={on ? "page" : undefined}
                 href={`/d/${id}/${v}/`}
                 className="px-3 py-1.5 rounded-md text-[13.5px] transition-colors whitespace-nowrap"
                 style={{
@@ -71,6 +76,7 @@ export default function DoublesDashboard({ id, view }: { id: string; view: strin
           })}
         </div>
         <button
+          aria-pressed={overlayOn}
           onClick={() => setOverlayOn(!overlayOn)}
           className="ml-auto mono text-[10.5px] tracking-[0.12em] px-2.5 py-1.5 rounded-md border transition-colors shrink-0"
           style={{
@@ -98,7 +104,10 @@ export default function DoublesDashboard({ id, view }: { id: string; view: strin
       </div>
 
       {error && (
-        <div className="card p-6 mt-6 text-err text-[14px]">Failed to load match data: {error}</div>
+        <div className="card p-6 mt-6 text-[14px]" role="alert">
+          <p className="text-err">Couldn’t load this match.</p>
+          <button onClick={retry} className="mt-3 rounded border border-[var(--line)] px-3 py-1.5">Try again</button>
+        </div>
       )}
       {!d && !error && (
         <div className="py-32 text-center text-dim mono text-[13px] animate-pulse">
@@ -116,6 +125,7 @@ export default function DoublesDashboard({ id, view }: { id: string; view: strin
           {view === "film" && <DoublesFilm d={d} id={id} goRally={goRally} />}
           {view === "lab" && <DoublesLab d={d} id={id} goRally={goRally} />}
           <ViewPager steps={steps} current={stepIx < 0 ? 0 : stepIx} />
+          <SiteFooter />
         </>
       )}
     </main>
