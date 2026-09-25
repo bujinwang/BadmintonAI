@@ -35,6 +35,11 @@ NUM_GAP = 10             # px gap between glyph clusters = separate numbers
                          # (digit gaps inside a number are 2-5 px; adjacent set
                          # cells can sit exactly 12 px apart — All England 2022)
 MIN_MATCH = 0.55         # min normalized correlation to accept a digit
+QUIET_CHROMA = 20        # background max-min channel spread below this = plain score-cell
+                         # fill; a tournament badge/photo to the right of the cells is
+                         # always well above it (measured 30-100+ on India Open 2022)
+MIN_QUIET_RUN = 8        # consecutive plain-background columns needed to call a gap real
+                         # (matches NUM_GAP's ballpark for genuine inter-cell space)
 
 
 # ------------------------------------------------------------- box location
@@ -91,8 +96,44 @@ def calibrate_box(match_id: str, n: int = 120):
 
 # ----------------------------------------------------------- glyph extraction
 
+def _content_width(strip: np.ndarray) -> int:
+    """How much of the strip, from x=0, is trustworthy score-cell territory.
+
+    Some tournament graphics (e.g. India Open 2022) carry a decorative badge/photo
+    immediately right of the score cells, inside STRIP_W — its shapes occasionally land
+    in the digit size band and (being unclassifiable) null the whole read. It's
+    positionally distinct though: once it starts, the background behind it stays
+    saturated (colorful) all the way to the strip's edge, whereas real score-cell
+    background (behind white OR yellow/server digits — checked on non-glyph pixels, so
+    a colorful digit itself doesn't trip this) is plain near-grayscale and any real gap
+    between cells/digits returns to plain before the next one. So: scan from the right
+    for the last run of >= MIN_QUIET_RUN plain-background columns and cut there,
+    discarding whatever comes after. No qualifying run (nothing looked decorative) =
+    no cut, matching every previous read."""
+    g = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY).astype(int)
+    bgr = strip.astype(int)
+    chroma = bgr.max(axis=2) - bgr.min(axis=2)
+    white = (g > 150) & (chroma < 70)
+    yellow = (g > 110) & (bgr[:, :, 2] > 140) & (bgr[:, :, 1] > 140) \
+        & (bgr[:, :, 0] < 120)
+    bg_chroma = np.where(white | yellow, -1, chroma)
+    run = 0
+    for x in range(strip.shape[1] - 1, -1, -1):
+        col = bg_chroma[:, x]
+        col = col[col >= 0]
+        plain = len(col) == 0 or np.median(col) < QUIET_CHROMA
+        if not plain:
+            run = 0
+            continue
+        run += 1
+        if run >= MIN_QUIET_RUN:
+            return x + MIN_QUIET_RUN
+    return strip.shape[1]
+
+
 def _row_glyphs(strip: np.ndarray) -> list[tuple[int, np.ndarray]]:
     """Bright digit glyphs on dark cell background in one row strip."""
+    strip = strip[:, :_content_width(strip)]
     g = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY).astype(int)
     bgr = strip.astype(int)
     chroma = bgr.max(axis=2) - bgr.min(axis=2)

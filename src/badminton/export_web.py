@@ -20,6 +20,7 @@ import argparse
 import json
 import re
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 import pandas as pd
@@ -43,7 +44,7 @@ def _js(o):
     if isinstance(o, (np.integer,)):
         return int(o)
     if isinstance(o, (np.floating, float)):
-        return None if (isinstance(o, float) or True) and pd.isna(o) else round(float(o), 3)
+        return None if not np.isfinite(o) else round(float(o), 3)
     if isinstance(o, (np.bool_,)):
         return bool(o)
     if o is pd.NA:
@@ -52,8 +53,16 @@ def _js(o):
 
 
 def _write(path: Path, obj) -> None:
+    payload = json.dumps(_js(obj), separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_js(obj), separators=(",", ":"), ensure_ascii=False))
+    with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        try:
+            tmp.write(payload)
+            tmp.close()
+            tmp_path.replace(path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
 
 def _yt_id(url: str) -> str | None:
@@ -134,6 +143,15 @@ def _clip_windows(match_id: str) -> list[tuple[int, int, str]]:
     return out
 
 
+def _clip_for(f0: int, f1: int, clips: list[tuple[int, int, str]]) -> str | None:
+    best, best_ov = None, 0
+    for a, b, url in clips:
+        ov = min(f1, b) - max(f0, a) + 1
+        if ov > best_ov:
+            best, best_ov = url, ov
+    return best if best_ov >= 0.6 * (f1 - f0 + 1) else None
+
+
 def export_source(match_id: str, source: str, out: Path) -> dict:
     m = config.get_match(match_id)
     fps = float(m["fps"])
@@ -145,19 +163,11 @@ def export_source(match_id: str, source: str, out: Path) -> dict:
 
     clips = _clip_windows(match_id)
 
-    def clip_for(f0: int, f1: int) -> str | None:
-        best, best_ov = None, 0
-        for a, b, url in clips:
-            ov = min(f1, b) - max(f0, a)
-            if ov > best_ov:
-                best, best_ov = url, ov
-        return best if best_ov >= 0.6 * (f1 - f0) else None
-
     rallies = []
     for _, r in rdf.iterrows():
         f0v, f1v = int(r["f0"]) + off, int(r["f1"]) + off
         rallies.append(dict(
-            clip=clip_for(f0v, f1v),
+            clip=_clip_for(f0v, f1v, clips),
             set=int(r["set_no"]), rally=int(r["rally_id"]), f0=f0v, f1=f1v,
             t0=round(f0v / fps, 2), t1=round(f1v / fps, 2),
             shots=int(r["shots"]), durS=float(r["duration_s"]),
@@ -297,6 +307,8 @@ def export_source(match_id: str, source: str, out: Path) -> dict:
                          else labelfree.pressure_by_shot(sdf, fps)).items()},
         pressureSummary=(tactics.pressure_summary(match_id) if source == "labels"
                          else labelfree.pressure_summary(sdf, fps)),
+        contactHeight=insights.contact_stats(sdf, rdf),
+        lateness=insights.lateness_stats(match_id, sdf, rdf, rmap, off),
     )
 
     mov = (insights.movement_by_player(match_id) if source == "labels"
@@ -317,6 +329,7 @@ def export_source(match_id: str, source: str, out: Path) -> dict:
                   tournament=m.get("tournament"), round=m.get("round"),
                   date=str(m.get("match_date", "")), youtubeId=_yt_id(m.get("video_url")),
                   fps=fps, sets=sets, winner="A",
+                  contactFrameOffset=hits.shuttle_offset(match_id) - SS_OFFSET if source == "labels" else 0,
                   totals=dict(rallies=len(rdf), shots=int(rdf["shots"].sum()),
                               rallySecs=int(rdf["durS"].sum() if "durS" in rdf else rdf["duration_s"].sum()),
                               points={p: pw[p]["points"] for p in ("A", "B")}),
@@ -442,11 +455,11 @@ def _agreement(match_id: str) -> dict:
         [match_id]).df()
     con.close()
     sdf = insights.stroke_df(match_id)
-    smap = insights.side_map_from(sdf)
+    smap = insights.rally_side_map(sdf)
     off = hits.shuttle_offset(match_id)
     of = df["frame_num"].to_numpy()
     used = np.zeros(len(df), bool)
-    n_match = hit_ok = shot_ok = shot_n = 0
+    n_match = hit_ok = shot_ok = shot_n = joint_ok = 0
     conf: dict[tuple, int] = {}
     for _, lab in sdf.iterrows():
         lf = int(lab["frame_num"]) + off
@@ -458,14 +471,16 @@ def _agreement(match_id: str) -> dict:
         used[j] = True
         n_match += 1
         mine = df.iloc[j]
-        lab_side = smap.get((int(lab["set_no"]), lab["hitter"]))
+        lab_side = smap.get((int(lab["set_no"]), int(lab["rally_id"])), {}).get(lab["hitter"])
         hit_ok += int(lab_side == mine["hitter"])
         if lab["shot"] in shotclass.CLASSES:
             shot_n += 1
             shot_ok += int(mine["shot_type"] == lab["shot"])
+            joint_ok += int(lab_side == mine["hitter"] and mine["shot_type"] == lab["shot"])
             k = (lab["shot"], mine["shot_type"])
             conf[k] = conf.get(k, 0) + 1
-    rec = {}
+    label_counts = sdf.loc[sdf["shot"].isin(shotclass.CLASSES), "shot"].value_counts()
+    rec = {shot: [0, 0] for shot in label_counts.index}
     for (l, p), n in conf.items():
         rec.setdefault(l, [0, 0])
         rec[l][1] += n
@@ -473,13 +488,17 @@ def _agreement(match_id: str) -> dict:
             rec[l][0] += n
     return dict(
         nLabel=len(sdf), nPipeline=len(df), nMatched=n_match,
-        coverage=round(n_match / len(sdf), 4),
+        coverage=round(n_match / len(sdf), 4) if len(sdf) else None,
+        precision=round(n_match / len(df), 4) if len(df) else None,
         hitterAcc=round(hit_ok / n_match, 4) if n_match else None,
         shotAcc=round(shot_ok / shot_n, 4) if shot_n else None,
-        e2e=round(shot_ok / len(sdf), 4),
+        e2e=round(shot_ok / len(sdf), 4) if len(sdf) else None,
+        jointE2e=round(joint_ok / len(sdf), 4) if len(sdf) else None,
         confusion=[dict(label=_disp(l), pred=_disp(p), n=n)
                    for (l, p), n in sorted(conf.items())],
-        recall=[dict(shot=_disp(l), recall=round(ok / tot, 3), n=tot)
+        recall=[dict(shot=_disp(l), recall=round(ok / tot, 3) if tot else None, n=tot,
+                     nLabel=int(label_counts[l]),
+                     overallRecall=round(ok / int(label_counts[l]), 3))
                 for l, (ok, tot) in sorted(rec.items())])
 
 
@@ -515,12 +534,25 @@ def _ocr_demo(match_id: str, out: Path, n_crops: int = 6) -> dict:
                 crops=crops)
 
 
+def _rally_coverage(snapshot: dict) -> list[dict]:
+    """Compare detected windows with score totals; equal counts do not imply alignment."""
+    rows = []
+    for set_no, score in sorted(snapshot.get("set_finals", {}).items(), key=lambda kv: int(kv[0])):
+        rallies = [r for r in snapshot.get("rallies", []) if int(r["set_no"]) == int(set_no)]
+        expected = sum(score)
+        rows.append(dict(set=int(set_no), expected=expected, detected=len(rallies),
+                         missing=expected - len(rallies),
+                         unknownWinners=sum(r.get("winner") not in ("A", "B") for r in rallies)))
+    return rows
+
+
 def export_showcase(match_id: str, out: Path, skip_slow: bool = False) -> None:
     from . import segment
     sc: dict = dict(heldOut=match_id == "denmark_open_2022_sf")
     sc["tracking"] = _tracking_validation(match_id)
     sc["agreement"] = _agreement(match_id)
     sc["ocr"] = _ocr_demo(match_id, out)
+    sc["rallyCoverage"] = _rally_coverage(json.loads(labelfree.snapshot_path(match_id).read_text()))
     if skip_slow:  # keep previously computed slow validations rather than dropping them
         prev_p = out / match_id / "showcase.json"
         if prev_p.exists():
@@ -589,7 +621,13 @@ def main() -> None:
     for mid in ids:
         print(f"== {mid}")
         entries.append(export_match(mid, out, skip_slow=args.skip_slow))
-    _write(out / "index.json", dict(matches=entries))
+    index_path = out / "index.json"
+    if args.match and index_path.exists():
+        # Refreshing one match must not remove every other match from the picker.
+        previous = json.loads(index_path.read_text())["matches"]
+        entries += [e for e in previous if e["id"] != args.match]
+        entries.sort(key=lambda e: e["id"])
+    _write(index_path, dict(matches=entries))
     print(f"wrote {out / 'index.json'} ({len(entries)} matches)")
 
 

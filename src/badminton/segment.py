@@ -15,7 +15,12 @@ Label-free rejection layers clean up what leaks through:
    so per-line offsets of 2–5 px defeat any thin-line brightness test. A
    serve-stance gate was also tried and abandoned: tracks are often missing in
    the 0.5 s before the serve, and ~13% of real serves fail it on track
-   glitches.)
+   glitches. The doubles scoreboard-presence gate was also tried and abandoned
+   for singles [2026-07-06]: the graphic isn't rendered yet during each set's
+   FIRST rally (2-3 real rallies gated out per match), and it removed ~zero
+   spurious runs here — these layers already catch the B-roll that gate exists
+   for. Worst case india_open: the late-match two-column graphic + trailing
+   badge broke read_frame entirely, 0/79 reads, dropping every set-2+ rally.)
 2. restart truncation: a non-first hit whose INCOMING speed is ~zero is a
    dead-shuttle restart (post-landing pickup tap, knock-back to the server) —
    the rally ended before it. NOTE invisible/static raw-shuttle spells do NOT
@@ -223,6 +228,76 @@ def segments(match_id: str) -> pd.DataFrame:
     df = pd.DataFrame(merged).sort_values("start").reset_index(drop=True)
     df.insert(0, "rally_key", df.index + 1)
     return df
+
+
+# ------------------------------------------------------------- score-driven rescue
+
+RESCUE_MIN_RUN = 15   # frames: a hole is score-certified, so short runs count too
+
+
+def rescue_windows(match_id: str, intervals, exclude=()) -> list[dict]:
+    """Relaxed re-detection inside KNOWN holes (score-driven segmentation repair).
+
+    `intervals` come from labelfree.hole_intervals: an OCR score event fired with
+    no detected rally to bind to, so a rally is certifiably in there — the priors
+    flip, and the conservative gates soften: short camera runs count, no bbox
+    band check, keep-rules reduce to 'wrist-attributed hits'. The single best
+    group per hole (most hits, then strongest) becomes the rescued rally.
+    `exclude` spans (start, end) mask already-detected rallies so a rescue can
+    never re-find one of them."""
+    if not intervals:
+        return []
+    bt = both_tracked(match_id)
+    out: list[dict] = []
+    for f0, f1 in intervals:
+        f0, f1 = max(0, int(f0)), min(len(bt) - 1, int(f1))
+        if out and f0 <= out[-1]["end"]:
+            f0 = out[-1]["end"] + 30          # never re-find the previous rescue
+        if f1 - f0 < RESCUE_MIN_RUN:
+            continue
+        idx = np.where(bt[f0:f1 + 1])[0]
+        if len(idx) == 0:
+            continue
+        runs = [[int(idx[0]), int(idx[0])]]
+        for k in idx[1:]:
+            if k - runs[-1][1] <= MERGE_GAP:
+                runs[-1][1] = int(k)
+            else:
+                runs.append([int(k), int(k)])
+        best = None
+        for a, b in runs:
+            if b - a < RESCUE_MIN_RUN:
+                continue
+            dh = hits.detect_hits(match_id, f0 + a - RUN_PAD, f0 + b + RUN_PAD)
+            if not dh:
+                continue
+            hits.attribute_hits(match_id, dh)
+            dh = [h for h in dh
+                  if h.get("player") and (h.get("dist_px") or 1e9) <= TRAIL_WRIST_PX
+                  and f0 <= h["frame"] <= f1
+                  and not any(s <= h["frame"] <= e for s, e in exclude)]
+            if not dh:
+                continue
+            groups: list[list[dict]] = [[dh[0]]]
+            for h in dh[1:]:
+                if h["frame"] - groups[-1][-1]["frame"] > SPLIT_GAP:
+                    groups.append([h])
+                else:
+                    groups[-1].append(h)
+            for g in groups:
+                key = (len(g), sum(h["score"] for h in g))
+                if best is None or key > best[0]:
+                    best = (key, g)
+        if best is None:
+            continue
+        g = best[1]
+        start, end = g[0]["frame"], g[-1]["frame"]
+        land = hits.find_landing(match_id, end)
+        out.append(dict(start=start, end=land["frame"] if land else end,
+                        last_hit=end, n_hits=len(g),
+                        serve_player=g[0].get("player"),
+                        hit_frames=[h["frame"] for h in g], rescued=True))
+    return out
 
 
 # ---------------------------------------------------------------- validation

@@ -19,6 +19,9 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -39,13 +42,29 @@ def _track_pos(con, match_id: str, frame: int, player: str, img: bool = False):
         else (float(row[0]), float(row[1]))
 
 
-def rally_windows(match_id: str, label_free: bool = False) -> list[tuple]:
+def rally_windows(match_id: str, label_free: bool = False,
+                  rescue: bool = True) -> list[tuple]:
     """[(set_no, rally_id, f0, f1)] hit-detection windows, one per rally.
-    Labeled: stroke frames ± 20. Label-free: segment.py windows (set_no=0)."""
+    Labeled: stroke frames ± 20. Label-free: segment.py windows (set_no=0),
+    plus score-driven hole rescue unless rescue=False (run --no-rescue + a
+    labelfree build first to measure the deficit CLEANLY, then rescue)."""
     if label_free:
-        from . import segment
-        return [(0, int(r.rally_key), int(r.start) - 8, int(r.last_hit) + 8)
-                for r in segment.segments(match_id).itertuples()]
+        from . import labelfree, segment
+        seg = segment.segments(match_id)
+        wins = [(0, int(r.rally_key), int(r.start) - 8, int(r.last_hit) + 8)
+                for r in seg.itertuples()]
+        if rescue and labelfree.available(match_id):
+            # score-driven repair: re-search the holes the score says exist
+            holes = labelfree.hole_intervals(match_id)
+            spans = [(int(r.start), int(r.end)) for r in seg.itertuples()]
+            base = int(seg["rally_key"].max()) if len(seg) else 0
+            resc = segment.rescue_windows(match_id, holes, exclude=spans)
+            for k, r in enumerate(resc, 1):
+                wins.append((0, base + k, int(r["start"]) - 8, int(r["last_hit"]) + 8))
+            if resc:
+                print(f"[pipeline] rescued {len(resc)} rally windows "
+                      f"from {len(holes)} score-certified holes")
+        return wins
     sdf = insights.stroke_df(match_id)
     off = hits.shuttle_offset(match_id)
     out = []
@@ -55,13 +74,14 @@ def rally_windows(match_id: str, label_free: bool = False) -> list[tuple]:
     return out
 
 
-def build_strokes(match_id: str, label_free: bool = False) -> pd.DataFrame:
+def build_strokes(match_id: str, label_free: bool = False,
+                  rescue: bool = True) -> pd.DataFrame:
     """One row per DETECTED stroke, with court coords + geometry features."""
     H = np.array(config.get_match(match_id)["homography"], np.float32).reshape(3, 3)
     con = db.connect(read_only=True)
 
     rows = []
-    for sn, rid, f0, f1 in rally_windows(match_id, label_free):
+    for sn, rid, f0, f1 in rally_windows(match_id, label_free, rescue=rescue):
         dh = hits.detect_hits(match_id, f0, f1)
         hits.attribute_hits(match_id, dh)
         dh = [h for h in dh if h.get("player") in ("near", "far")]
@@ -121,15 +141,78 @@ def build_strokes(match_id: str, label_free: bool = False) -> pd.DataFrame:
     return df
 
 
+def _stack_cache_path(match_id: str) -> Path:
+    """Invalidate deploy-style features when their code, calibration or model changes."""
+    digest = hashlib.sha256(json.dumps(config.get_match(match_id), sort_keys=True, default=str).encode())
+    for name in ("pipeline", "hits", "shotclass", "contact", "bst_eval", "insights", "court",
+                 "shuttleset"):
+        digest.update(Path(__file__).with_name(f"{name}.py").read_bytes())
+    weights = config.REPO_ROOT / "third_party/BST/bst_weights/bst_0_JnB_bone_merged.pt"
+    if weights.exists():
+        stat = weights.stat()
+        digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return config.REPO_ROOT / "data/cache" / f"stack_train_{match_id}_{digest.hexdigest()[:16]}.parquet"
+
+
+def stack_training_frame(match_id: str) -> pd.DataFrame:
+    """Deploy-style stack training rows for a LABELED match (cached in data/cache).
+
+    The stacked classifier must train on features computed EXACTLY the way
+    inference computes them — at DETECTED hits, with detection noise and NaN
+    landings — not on labeled-frame features. (Measured: a labeled-frame-trained
+    stack scored 85.7% on labeled frames but only 67% deployed on detected hits,
+    UNDER the 72.5% BST-argmax it replaced. Domain gap, not model quality.)
+    Rows: build_strokes at the labeled rally windows + BST probs + contact height
+    at those detected frames, labeled by the ±6-frame-matched human stroke."""
+    cache = _stack_cache_path(match_id)
+    if cache.exists():
+        return pd.read_parquet(cache)
+    from . import bst_eval, contact
+    df = build_strokes(match_id, label_free=False)
+    feats = bst_eval.canonical_prob_frame(
+        bst_eval.probs_centers(match_id, df["frame_num"].tolist()))
+    prob_cols = [c for c in feats.columns if c.startswith("p_") or c == "bst_conf"]
+    for c in prob_cols:
+        df[c] = feats[c].to_numpy()
+    df["est_h"] = contact.estimate_df(
+        match_id, df.rename(columns={"hit_img_y": "hit_y"}))
+
+    sdf = insights.stroke_df(match_id)
+    off = hits.shuttle_offset(match_id)
+    lab_shot: dict = {}
+    for (sn, rid), g in sdf.groupby(["set_no", "rally_id"]):
+        ours = df[(df["set_no"] == sn) & (df["rally_id"] == rid)]
+        used: set = set()
+        for _, lab in g.iterrows():
+            lf = int(lab["frame_num"]) + off
+            cands = [(abs(int(f) - lf), i) for i, f in
+                     zip(ours.index, ours["frame_num"])
+                     if i not in used and abs(int(f) - lf) <= 6]
+            if cands and lab["shot"] in shotclass.CLASSES:
+                _, i = min(cands)
+                used.add(i)
+                lab_shot[i] = lab["shot"]
+    df["shot"] = pd.Series(lab_shot)
+    out = df.loc[df["shot"].notna(),
+                 shotclass.CV_FEATURES + ["est_h"] + prob_cols + ["shot"]]
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    out.to_parquet(cache)
+    return out
+
+
 def classify(df: pd.DataFrame, train_match: str, use_bst: bool = True) -> pd.DataFrame:
     """Predict shot_type for pipeline strokes.
 
-    Primary: pretrained BST-0 at the DETECTED hit frames (bst_eval.classify_centers);
-    its side prediction (98% accurate) also overrides wrist attribution — hitter,
-    receiver, and their positions are swapped where they disagree.
-    Fallback: the geometry classifier trained on the OTHER match (also used for any
-    stroke BST calls 'unknown', or when the BST weights are missing).
+    Primary: a STACKED classifier — geometry features + estimated contact height
+    + the pretrained BST-0's canonical class probabilities — trained on every
+    OTHER labeled match (leave-this-match-out; measured mean held-out 85.7% vs
+    76.8% BST-argmax and 80.9% geometry-only). BST's side prediction (98%) still
+    overrides wrist attribution: hitter/receiver + positions swap on disagreement.
+    Fallbacks: BST argmax when the stack can't train; the geometry classifier
+    trained on `train_match` when the BST weights/deps are missing entirely.
     """
+    from . import contact
+    match_id = df["match_id"].iloc[0]
     tr = shotclass.build_features(train_match, feet_landing=True)
     clf = shotclass._model().fit(tr[shotclass.CV_FEATURES], tr["shot"])
     X = df[shotclass.CV_FEATURES]
@@ -144,8 +227,8 @@ def classify(df: pd.DataFrame, train_match: str, use_bst: bool = True) -> pd.Dat
         from . import bst_eval
         if not bst_eval.WEIGHTS.exists():
             raise FileNotFoundError(bst_eval.WEIGHTS)
-        match_id = df["match_id"].iloc[0]
-        preds = bst_eval.classify_centers(match_id, df["frame_num"].tolist())
+        feats = bst_eval.canonical_prob_frame(
+            bst_eval.probs_centers(match_id, df["frame_num"].tolist()))
     except Exception as e:                                  # missing weights/deps
         print(f"[pipeline] BST unavailable ({e}); geometry only")
         return df
@@ -153,20 +236,45 @@ def classify(df: pd.DataFrame, train_match: str, use_bst: bool = True) -> pd.Dat
     swap = {"hitter": "receiver", "receiver": "hitter",
             "hitter_x": "receiver_x", "receiver_x": "hitter_x",
             "hitter_y": "receiver_y", "receiver_y": "hitter_y"}
-    for i, p in zip(df.index, preds):
-        if p["shot"] is None:
-            continue                                        # keep geometry fallback
-        df.loc[i, ["shot_type", "shot_type_conf", "classifier"]] = \
-            (p["shot"], p["conf"], "bst")
-        if p["side"] is not None and p["side"] != df.at[i, "hitter"]:
+    for i, side in zip(df.index, feats["bst_side"]):
+        if side is not None and side != df.at[i, "hitter"]:
             df.loc[i, list(swap)] = df.loc[i, list(swap.values())].to_numpy()
+
+    try:
+        con = db.connect(read_only=True)
+        labeled = [r[0] for r in con.execute(
+            "SELECT DISTINCT match_id FROM strokes WHERE source='shuttleset'"
+            " AND match_id != ?", [match_id]).fetchall()]
+        con.close()
+        if not labeled:
+            raise RuntimeError("no other labeled matches to train the stack on")
+        trs = pd.concat([stack_training_frame(m) for m in labeled],
+                        ignore_index=True)
+        prob_cols = [c for c in feats.columns
+                     if c.startswith("p_") or c == "bst_conf"]
+        cols = shotclass.CV_FEATURES + ["est_h"] + prob_cols
+        sclf = shotclass._model().fit(trs[cols], trs["shot"])
+
+        df["est_h"] = contact.estimate_df(
+            match_id, df.rename(columns={"hit_img_y": "hit_y"}))
+        for c in prob_cols:
+            df[c] = feats[c].to_numpy()
+        df["shot_type"] = sclf.predict(df[cols])
+        df["shot_type_conf"] = sclf.predict_proba(df[cols]).max(axis=1)
+        df["classifier"] = "stack"
+        df = df.drop(columns=prob_cols)
+    except Exception as e:
+        print(f"[pipeline] stack unavailable ({e}); BST argmax over geometry")
+        for i, (shot, conf) in zip(df.index, zip(feats["bst_shot"], feats["bst_conf"])):
+            if shot is not None:
+                df.loc[i, ["shot_type", "shot_type_conf", "classifier"]] = \
+                    (shot, conf, "bst")
     return df
 
 
 def write_strokes(match_id: str, df: pd.DataFrame) -> int:
     """Persist as source='pipeline' rows (idempotent per match)."""
-    con = db.connect()
-    try:
+    with db.transaction() as con:
         con.execute("DELETE FROM strokes WHERE match_id=? AND source='pipeline'",
                     [match_id])
         base = con.execute("SELECT COALESCE(MAX(stroke_id), 0) + 1 FROM strokes"
@@ -179,26 +287,28 @@ def write_strokes(match_id: str, df: pd.DataFrame) -> int:
                  r.landing_x, r.landing_y,
                  float(r.shot_type_conf), "pipeline")
                 for i, r in enumerate(df.itertuples())]
-        con.executemany(
-            "INSERT INTO strokes (stroke_id, match_id, set_no, rally_id, ball_round,"
-            " frame_num, hitter, receiver, shot_type, coord_space,"
-            " hitter_x, hitter_y, receiver_x, receiver_y, hit_x, hit_y,"
-            " landing_x, landing_y, shot_type_conf, source)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", recs)
-    finally:
-        con.close()
+        if recs:
+            con.executemany(
+                "INSERT INTO strokes (stroke_id, match_id, set_no, rally_id, ball_round,"
+                " frame_num, hitter, receiver, shot_type, coord_space,"
+                " hitter_x, hitter_y, receiver_x, receiver_y, hit_x, hit_y,"
+                " landing_x, landing_y, shot_type_conf, source)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", recs)
+    from . import contact
+    contact.backfill(match_id)      # fills contact_height_m from tracks + shuttle
     return len(df)
 
 
 def evaluate(match_id: str, train_match: str, verbose: bool = True,
-             use_bst: bool = True, label_free: bool = False) -> dict:
+             use_bst: bool = True, label_free: bool = False,
+             rescue: bool = True) -> dict:
     """End-to-end agreement of pipeline strokes vs ShuttleSet labels.
     With label_free=True the rally keys don't correspond to labels, so strokes
     are matched GLOBALLY by frame instead of within each labeled rally."""
-    df = classify(build_strokes(match_id, label_free=label_free), train_match,
-                  use_bst=use_bst)
+    df = classify(build_strokes(match_id, label_free=label_free, rescue=rescue),
+                  train_match, use_bst=use_bst)
     sdf = insights.stroke_df(match_id)
-    smap = insights.side_map_from(sdf)
+    smap = insights.rally_side_map(sdf)
 
     off = hits.shuttle_offset(match_id)
     n_match = hit_ok = shot_ok = shot_n = 0
@@ -220,7 +330,7 @@ def evaluate(match_id: str, train_match: str, verbose: bool = True,
             used[j] = True
             n_match += 1
             mine = ours.iloc[j]
-            if smap.get((int(sn), lab["hitter"])) == mine["hitter"]:
+            if smap.get((int(sn), int(rid)), {}).get(lab["hitter"]) == mine["hitter"]:
                 hit_ok += 1
             if lab["shot"] in shotclass.CLASSES:
                 shot_n += 1
@@ -256,10 +366,12 @@ if __name__ == "__main__":
     ap.add_argument("--no-bst", action="store_true", help="geometry classifier only")
     ap.add_argument("--label-free", action="store_true",
                     help="rally windows from segment.py instead of ShuttleSet")
+    ap.add_argument("--no-rescue", action="store_true",
+                    help="skip the score-driven hole rescue (clean baseline pass)")
     args = ap.parse_args()
     train = args.train_match or OTHER.get(args.match_id, args.match_id)
     res = evaluate(args.match_id, train, use_bst=not args.no_bst,
-                   label_free=args.label_free)
+                   label_free=args.label_free, rescue=not args.no_rescue)
     if args.write:
         n = write_strokes(args.match_id, res["df"])
         print(f"wrote {n} source='pipeline' rows")

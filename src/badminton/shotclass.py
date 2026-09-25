@@ -57,8 +57,8 @@ def build_features(match_id: str, feet_landing: bool = False) -> pd.DataFrame:
         last = nx_next.isna()
         sdf["land_mx"] = np.where(last, sdf["land_mx"], nx_next)
         sdf["land_my"] = np.where(last, sdf["land_my"], ny_next)
-        smap = insights.side_map_from(sdf)
-        flip = sdf.apply(lambda r: smap.get((r.set_no, r.hitter)) == "far",
+        smap = insights.rally_side_map(sdf)
+        flip = sdf.apply(lambda r: smap.get((r.set_no, r.rally_id), {}).get(r.hitter) == "far",
                          axis=1).to_numpy()
         W, L = court.COURT_WIDTH_M, court.COURT_LENGTH_M
         sdf["land_nx"] = np.where(flip, W - sdf["land_mx"], sdf["land_mx"])

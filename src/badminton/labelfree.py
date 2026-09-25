@@ -32,7 +32,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from . import analytics, config, court, db, score_seq
+from . import analytics, config, contact, court, db, score_seq
 
 SNAP_DIR = config.REPO_ROOT / "data" / "labelfree"
 CLUTCH_FROM = 18          # keep in sync with insights.CLUTCH_FROM
@@ -54,10 +54,55 @@ def _pipeline_rallies(con, match_id: str) -> pd.DataFrame:
     df = con.execute(
         "SELECT rally_id AS rally_key, MIN(frame_num) AS f0, MAX(frame_num) AS f1,"
         " COUNT(*) AS shots,"
-        " MIN_BY(hitter, ball_round) AS serve_side"
+        " MIN_BY(hitter, ball_round) AS serve_side,"
+        " MIN_BY(hitter_x, ball_round) AS serve_x,"
+        " MIN_BY(receiver_x, ball_round) AS serve_rx"
         " FROM strokes WHERE match_id=? AND source='pipeline' AND set_no=0"
         " GROUP BY rally_id ORDER BY f0", [match_id]).df()
+    # rule 9.1: the server's court is fixed by their own score's parity — one
+    # free, OCR-independent bit per rally (score_seq.serve_court_parity)
+    df["parity_even"] = [
+        score_seq.serve_court_parity(sx, rx, side == "near")
+        if pd.notna(sx) and pd.notna(rx) and side in ("near", "far") else None
+        for sx, rx, side in zip(df["serve_x"], df["serve_rx"], df["serve_side"])]
     return df
+
+
+def hole_intervals(match_id: str, max_len: int = 3600) -> list[tuple[int, int]]:
+    """Frame windows that MUST hold an undetected rally (score-driven repair).
+
+    An OCR score event that finds no rally to bind to is an orphan: the score
+    moved, so a rally happened, and the segmenter missed it. The window runs
+    from just after the last detected rally to the orphan event's frame (the
+    overlay only lags, never leads). segment.rescue_windows re-searches these
+    with relaxed thresholds; pipeline --label-free consumes both."""
+    if not available(match_id):
+        return []
+    snap = json.loads(snapshot_path(match_id).read_text())
+    ev = snap.get("events") or []
+    # Budget rescues by the DEFICIT the decoder measured per set. Orphan events
+    # also arise from event-binding greed with no rally actually missing —
+    # un-budgeted rescue turned denmark's {0,+1} into {-2,-2} (5 spurious
+    # rallies invented from relaxed-threshold junk kinks).
+    budget = {int(sn): int(n) for sn, n in (snap.get("rallies_missing") or {}).items()}
+    con = db.connect(read_only=True)
+    ral = _pipeline_rallies(con, match_id)
+    con.close()
+    unassigned = list(ral.index)
+    out: list[tuple[int, int]] = []
+    last_end = 0
+    for e in ev:
+        f = int(e["frame"])
+        cands = [i for i in unassigned if ral.loc[i, "f1"] <= f]
+        if cands:
+            last_end = max(last_end, max(int(ral.loc[i, "f1"]) for i in cands))
+            unassigned = [j for j in unassigned if j not in cands]
+        else:
+            if budget.get(int(e["set_no"]), 0) > 0:
+                budget[int(e["set_no"])] -= 1
+                out.append((max(last_end + 30, f - max_len), f))
+            last_end = max(last_end, f - 150)   # the next orphan's rally follows
+    return out
 
 
 def build(match_id: str, verbose: bool = True, rescan: bool = False,
@@ -80,8 +125,9 @@ def build(match_id: str, verbose: bool = True, rescan: bool = False,
                 f"--from-snapshot needs an existing snapshot at "
                 f"{snapshot_path(match_id)} — run a full build once with the DB first")
         ral = pd.DataFrame(snap_cached["rallies"])
-        if "serve_side" not in ral.columns:
-            ral["serve_side"] = None      # DB-only signal; the side map is carried below
+        for c in ("serve_side", "parity_even"):   # DB-only signals; older snapshots
+            if c not in ral.columns:              # predate them — side map is carried below
+                ral[c] = None
     else:
         con = db.connect(read_only=True)
         ral = _pipeline_rallies(con, match_id)
@@ -142,6 +188,7 @@ def build(match_id: str, verbose: bool = True, rescan: bool = False,
     rows = []
     for i in ral.index:
         e = assigned.get(i)
+        par = ral.loc[i, "parity_even"]
         rows.append(dict(
             rally_key=int(ral.loc[i, "rally_key"]),
             f0=int(ral.loc[i, "f0"]), f1=int(ral.loc[i, "f1"]),
@@ -150,6 +197,10 @@ def build(match_id: str, verbose: bool = True, rescan: bool = False,
                     else ("A" if e["winner"] == row_a else "B")),
             score_a=int(e["top"] if row_a == "top" else e["bot"]) if e is not None else None,
             score_b=int(e["bot"] if row_a == "top" else e["top"]) if e is not None else None,
+            ocr=e is not None,
+            serve_side=(ral.loc[i, "serve_side"]
+                        if ral.loc[i, "serve_side"] in ("near", "far") else None),
+            parity_even=None if pd.isna(par) else bool(par),
         ))
     # rallies without an event inherit the set of the next assigned rally
     for i in range(len(rows) - 1, -1, -1):
@@ -190,16 +241,8 @@ def build(match_id: str, verbose: bool = True, rescan: bool = False,
     n_points: dict[int, int] = {}
     for sn, *_ in plog:
         n_points[sn] = n_points.get(sn, 0) + 1
-    for sn, (t, b) in score_seq.set_finals(plog).items():
-        fa, fb = (t, b) if row_a == "top" else (b, t)
-        in_set = [r for r in rows if r["set_no"] == sn]
-        if not in_set or (in_set[-1]["score_a"], in_set[-1]["score_b"]) == (fa, fb):
-            continue
-        r = in_set[-1]
-        r["score_a"], r["score_b"] = fa, fb
-        da, db_ = fa - r["prev_a"], fb - r["prev_b"]
-        if da or db_:                     # who took the game-winning rally
-            r["winner"] = "A" if da >= db_ else "B"
+    # (the finals are applied to the last rally of each game AFTER the serve-parity
+    # winner fill below — the fill needs the per-rally side map first)
 
     # --- side of player A per RALLY ("winner serves next" votes, flip-aware).
     # Each winner event constrains which side the winning ROW serves the NEXT
@@ -274,6 +317,86 @@ def build(match_id: str, verbose: bool = True, rescan: bool = False,
             r["side_a"] = cached_side.get(r["rally_key"])
         top_fn = {int(sn): (None, int(k))
                   for sn, k in (snap_cached.get("flips") or {}).items()}
+
+    # --- OCR-less rally winners: "winner serves next" × serve-court parity.
+    # A rally the overlay never updated for still leaves two geometric traces on
+    # the NEXT rally: WHO serves it (rule 11.2 — the winner) and WHICH court they
+    # serve from (rule 9.1 — the server's own score's parity, read off the stance
+    # by score_seq.serve_court_parity at 96.3% vs labels). The two are
+    # independent; a winner is filled only where BOTH agree (confirm_winner).
+    # One forward pass re-chains the scores as it fills, so a filled +1 also
+    # turns the next OCR event's 2-point "jump" back into the single point it
+    # really was — resolving THAT rally's winner from the score delta too.
+    # Two guards keep a false fill (~5% of fills: serve side wrong AND parity
+    # coincidentally matching) from corrupting the score worm: a fill may never
+    # push a side past its decoded set final, and when the next real OCR
+    # reading contradicts the chain (negative delta), every fill since the
+    # previous reading is reverted and the span re-walked without filling.
+    finals_ab = {sn: ((t, b) if row_a == "top" else (b, t))
+                 for sn, (t, b) in score_seq.set_finals(plog).items()}
+    prev = {}
+    span_fills: dict[int, list[int]] = {}     # set -> rows filled since last event
+    i = 0
+    while i < len(rows):
+        r = rows[i]
+        sn = r["set_no"]
+        pa, pb = prev.get(sn, (0, 0))
+        r["prev_a"], r["prev_b"] = pa, pb
+        if not r.get("ocr"):
+            if r["winner"] is None and r.get("side_a") is not None \
+                    and not r.get("_nofill"):
+                j = i + 1
+                nxt = rows[j] if j < len(rows) and rows[j]["set_no"] == sn else None
+                if nxt and nxt.get("side_a") and nxt.get("serve_side"):
+                    cand = "x" if nxt["serve_side"] == nxt["side_a"] else "y"
+                    w = score_seq.confirm_winner(pa, pb, cand, nxt.get("parity_even"))
+                    fa, fb = finals_ab.get(sn, (99, 99))
+                    if w == "x" and pa + 1 <= fa:
+                        r["winner"] = "A"
+                        span_fills.setdefault(sn, []).append(i)
+                    elif w == "y" and pb + 1 <= fb:
+                        r["winner"] = "B"
+                        span_fills.setdefault(sn, []).append(i)
+            if r["winner"] == "A":
+                r["score_a"], r["score_b"] = pa + 1, pb
+            elif r["winner"] == "B":
+                r["score_a"], r["score_b"] = pa, pb + 1
+            else:
+                r["score_a"], r["score_b"] = pa, pb
+        else:
+            da, db_ = r["score_a"] - pa, r["score_b"] - pb
+            if (da < 0 or db_ < 0) and span_fills.get(sn):
+                k0 = span_fills[sn][0]
+                for k in span_fills[sn]:
+                    rows[k]["winner"] = None
+                    rows[k]["_nofill"] = True
+                span_fills[sn] = []
+                prev[sn] = (rows[k0]["prev_a"], rows[k0]["prev_b"])
+                i = k0
+                continue
+            if r["winner"] is None:
+                if (da, db_) == (1, 0):
+                    r["winner"] = "A"
+                elif (da, db_) == (0, 1):
+                    r["winner"] = "B"
+            span_fills[sn] = []
+        prev[sn] = (r["score_a"], r["score_b"])
+        i += 1
+    for r in rows:
+        r.pop("_nofill", None)
+
+    # --- close out each game on the scoring rules: the last DETECTED rally of a
+    # game carries that game's true final (see plog above).
+    for sn, (t, b) in score_seq.set_finals(plog).items():
+        fa, fb = (t, b) if row_a == "top" else (b, t)
+        in_set = [r for r in rows if r["set_no"] == sn]
+        if not in_set or (in_set[-1]["score_a"], in_set[-1]["score_b"]) == (fa, fb):
+            continue
+        r = in_set[-1]
+        r["score_a"], r["score_b"] = fa, fb
+        da, db_ = fa - r["prev_a"], fb - r["prev_b"]
+        if da or db_:                     # who took the game-winning rally
+            r["winner"] = "A" if da >= db_ else "B"
 
     # Per-set summary kept for set-level consumers + the verbose print. This is the side
     # A STARTED the set on, not a majority: the deciding game changes ends at 11, so its
@@ -360,7 +483,7 @@ def stroke_df(match_id: str) -> pd.DataFrame:
     con = db.connect(read_only=True)
     df = con.execute(
         "SELECT rally_id AS rally_key, ball_round, frame_num, hitter AS hitter_side,"
-        " receiver AS recv_side, shot_type, shot_type_conf,"
+        " receiver AS recv_side, shot_type, shot_type_conf, contact_height_m,"
         " hitter_x AS hitter_mx, hitter_y AS hitter_my,"
         " receiver_x AS recv_mx, receiver_y AS recv_my,"
         " landing_x AS land_mx, landing_y AS land_my, hit_x, hit_y"
@@ -388,7 +511,11 @@ def stroke_df(match_id: str) -> pd.DataFrame:
     df["shot_type_raw"] = None
     df["aroundhead"] = False
     df["backhand"] = False
-    df["hit_height"] = np.nan
+    # CV contact height -> the same binary band ShuttleSet labels use
+    # (1 = above the net tape, 2 = below; see contact.py for the validation)
+    df["hit_height"] = np.where(df["contact_height_m"].notna(),
+                                np.where(df["contact_height_m"] > contact.HIGH_M,
+                                         1.0, 2.0), np.nan)
     df["landing_area"] = np.nan
     df["lose_reason"] = None
     df["win_reason"] = None
@@ -474,7 +601,8 @@ def pressure_strokes(sdf: pd.DataFrame, fps: float) -> list[dict]:
                     out.append(dict(set=int(c["set_no"]), rally=int(c["rally_id"]),
                                     shot_no=int(c["ball_round"]), hitter=c["hitter"],
                                     prev_hitter=prev["hitter"], req_speed=spd,
-                                    low_contact=False, prev_shot=prev["shot"]))
+                                    low_contact=bool(c["hit_height"] == 2.0),
+                                    prev_shot=prev["shot"]))
             prev = c
     return out
 
@@ -511,7 +639,8 @@ def rally_detail(sdf: pd.DataFrame, fps: float, set_no: int, rally_id: int) -> l
                 req = round(float(np.hypot(c["hitter_mx"] - prev["recv_mx"],
                                            c["hitter_my"] - prev["recv_my"]) / dt), 1)
         out.append(dict(shot=int(c["ball_round"]), hitter=c["hitter"], type=c["shot"],
-                        low_contact=False, zone=None, pressure_mps=req))
+                        low_contact=bool(c["hit_height"] == 2.0), zone=None,
+                        pressure_mps=req))
         prev = c
     return out
 

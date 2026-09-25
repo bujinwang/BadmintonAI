@@ -115,15 +115,12 @@ def import_csv(match_id: str, csv_file: Path, frame_offset: int = 0,
         return 0
 
     lo, hi = replace_window or (rows[0][1], rows[-1][1])
-    con = db.connect()
-    try:
+    with db.transaction() as con:
         con.execute("DELETE FROM shuttle WHERE match_id=? AND frame_num BETWEEN ? AND ?",
                     [match_id, lo, hi])
         con.executemany(
             "INSERT INTO shuttle (match_id, frame_num, img_x, img_y, visible) "
             "VALUES (?, ?, ?, ?, ?)", rows)
-    finally:
-        con.close()
     return len(rows)
 
 

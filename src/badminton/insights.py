@@ -388,6 +388,91 @@ def movement_by_player(match_id: str) -> dict:
     return out
 
 
+# ------------------------------------------------- contact height & lateness (pose)
+
+ARRIVE_R = 0.75    # m: within this radius of the contact point = "at the shot"
+RUSHED_S = 0.25    # s: settling inside ARRIVE_R this late = hit on the run
+
+
+def contact_stats(sdf: pd.DataFrame, rdf: pd.DataFrame) -> dict:
+    """Per player: share of contacts taken ABOVE the net tape, the below-tape
+    share of their rally-ending errors, and (AI source only) the median estimated
+    contact height in metres. hit_height carries the band for both sources —
+    ShuttleSet's human label on 'labels', contact.py's CV estimate on 'ai'."""
+    errs = rdf[rdf["winner"].notna() & ~rdf["category"].isin(["Winner", "—"])]
+    err_keys = set(zip(errs["set_no"], errs["rally_id"], errs["end_round"]))
+    rated = sdf[sdf["hit_height"].isin([1.0, 2.0])]
+    out = {}
+    for p in ("A", "B"):
+        mine = rated[rated["hitter"] == p]
+        end_err = [(sn, rid, br) in err_keys for sn, rid, br in
+                   zip(mine["set_no"], mine["rally_id"], mine["ball_round"])]
+        me = mine[np.array(end_err, dtype=bool)] if len(mine) else mine
+        med = None
+        if "contact_height_m" in mine.columns and mine["contact_height_m"].notna().any():
+            med = round(float(mine["contact_height_m"].median()), 2)
+        out[p] = dict(
+            n=len(mine),
+            high_pct=round(100 * float((mine["hit_height"] == 1.0).mean())) if len(mine) else 0,
+            n_err=len(me),
+            err_low_pct=round(100 * float((me["hit_height"] == 2.0).mean())) if len(me) else 0,
+            med_m=med)
+    return out
+
+
+def lateness_stats(match_id: str, sdf: pd.DataFrame, rdf: pd.DataFrame,
+                   rmap: dict, offset: int) -> dict:
+    """Per player: ARRIVAL MARGIN — how long before contact they settled within
+    ARRIVE_R of the contact point (pose tracks; margin capped at 3 s). Pressure
+    (required speed) says how hard the run was; this says whether they actually
+    made it in time. A sub-RUSHED_S margin = the shot was hit on the run.
+    `offset` maps this source's stroke frames onto the video-frame tracks."""
+    _, fps = _H_fps(match_id)
+    spans = sdf.groupby(["set_no", "rally_id"])["frame_num"].agg(["min", "max"])
+    ends = {(int(r.set_no), int(r.rally_id)): (int(r.end_round), r.winner, r.category)
+            for r in rdf.itertuples()
+            if r.winner in ("A", "B") and r.category != "—"}
+    per = {p: {"all": [], "err": [], "win": []} for p in ("A", "B")}
+    for (sn, rid), (f0, f1) in spans.iterrows():
+        series = analytics.player_series(
+            match_id, int(f0) + offset - 90, int(f1) + offset)
+        g = sdf[(sdf["set_no"] == sn) & (sdf["rally_id"] == rid)]
+        rs = rmap.get((int(sn), int(rid)), {})
+        end_round, winner, _cat = ends.get((int(sn), int(rid)), (None, None, None))
+        for s in g.itertuples():
+            side = getattr(s, "hitter_side", None) or rs.get(s.hitter)
+            arr = series.get(side)
+            if arr is None or s.hitter not in ("A", "B"):
+                continue
+            fc = int(s.frame_num) + offset
+            m = arr[(arr[:, 0] <= fc) & (arr[:, 0] >= fc - 90)]
+            if len(m) < 4 or fc - m[-1, 0] > 3:
+                continue
+            # contact point = the TRACK's own position at contact. Measuring
+            # against the stroke's labeled position instead injects its ~0.5 m
+            # cross-source error and can push the margin negative.
+            d = np.hypot(m[:, 1] - m[-1, 1], m[:, 2] - m[-1, 2])
+            outside = np.where(d > ARRIVE_R)[0]
+            since = m[outside[-1], 0] + 1 if len(outside) else m[0, 0]
+            margin = min(float((fc - since) / fps), 3.0)
+            per[s.hitter]["all"].append(margin)
+            if end_round is not None and int(s.ball_round) == end_round:
+                per[s.hitter]["err" if s.hitter != winner else "win"].append(margin)
+    out = {}
+    for p in ("A", "B"):
+        d = per[p]
+        out[p] = dict(
+            n=len(d["all"]), n_err=len(d["err"]),
+            med_all=round(float(np.median(d["all"])), 2) if d["all"] else None,
+            med_err=round(float(np.median(d["err"])), 2) if d["err"] else None,
+            med_win=round(float(np.median(d["win"])), 2) if d["win"] else None,
+            rushed_all_pct=round(100 * float(np.mean(np.array(d["all"]) < RUSHED_S)))
+            if d["all"] else 0,
+            rushed_err_pct=round(100 * float(np.mean(np.array(d["err"]) < RUSHED_S)))
+            if d["err"] else 0)
+    return out
+
+
 def rally_tracks(match_id: str, f0: int, f1: int) -> pd.DataFrame:
     """Per-frame court positions for one rally window (ShuttleSet frame numbers)."""
     con = db.connect(read_only=True)

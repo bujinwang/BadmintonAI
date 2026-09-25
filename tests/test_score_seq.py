@@ -150,6 +150,19 @@ def test_serve_court_parity():
     print("ok  serve_court_parity")
 
 
+def test_confirm_winner():
+    # from 3-5, an 'x' win puts x at 4 (even): an even-court serve stance confirms
+    assert score_seq.confirm_winner(3, 5, "x", True) == "x"
+    # ... and an odd-court stance contradicts it — abstain, never guess
+    assert score_seq.confirm_winner(3, 5, "x", False) is None
+    # a 'y' win puts y at 6 (even) — same stance confirms the OTHER candidate
+    assert score_seq.confirm_winner(3, 5, "y", True) == "y"
+    # either signal missing = no call
+    assert score_seq.confirm_winner(3, 5, None, True) is None
+    assert score_seq.confirm_winner(3, 5, "x", None) is None
+    print("ok  confirm_winner needs both geometric votes")
+
+
 # --------------------------------------------------------- end-to-end accuracy
 
 def test_decoded_scorelines_match_ground_truth():

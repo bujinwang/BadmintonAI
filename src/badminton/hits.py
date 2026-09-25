@@ -47,6 +47,14 @@ MIN_TURN_COS = 0.5      # reversal requires ≥ 60° turn
 MIN_GAP = 8             # min frames between hits (fastest exchanges ~0.3 s)
 GAP_INTERP = 6          # interpolate visibility gaps up to this many frames
 WRIST_IDX = (9, 10)     # COCO left/right wrist
+WRIST_PK = 10.0         # px/frame wrist-speed peak = a swing the pose saw. 86-89% of
+                        # missed hits are far-side (drop/net/block kinks too soft at
+                        # that image scale) or serves, and 79-87% of them show a clear
+                        # wrist peak — the pose sees what the shuttle track misses.
+WRIST_SH_PX = 60.0      # ...but only a swing with the shuttle track THIS close to the
+                        # fast wrist is a contact (prep swings and fakes are not).
+                        # Tuned on india (R 86.7→89.9 @ P 87.2); held out: denmark
+                        # R 81.7→87.5 / F1 85.8→87.2, ws_final R 91.3 / F1 88.1.
 
 
 def shuttle_series(match_id: str, f0: int, f1: int,
@@ -142,8 +150,60 @@ def detect_hits(match_id: str, f0: int, f1: int, min_dv: float = MIN_DV,
                                  serve=True))
             break
 
+    # Fourth pass — POSE-FUSED recovery (see WRIST_PK/WRIST_SH_PX): a wrist-speed
+    # peak with the raw shuttle track adjacent is a contact the kink detectors
+    # missed. Uses the raw (non-interpolated) track already loaded above.
+    hits += _wrist_hits(match_id, f0, f1, hits, xy, int(frames[0]))
+
     hits.sort(key=lambda h: h["frame"])
     return hits
+
+
+def _wrist_hits(match_id: str, f0: int, f1: int, existing: list[dict],
+                xy_raw: np.ndarray, base: int) -> list[dict]:
+    """Wrist-velocity contact candidates away from any existing hit."""
+    con = db.connect(read_only=True)
+    rows = con.execute(
+        "SELECT frame_num, player_id, keypoints FROM tracks WHERE match_id=? "
+        "AND frame_num BETWEEN ? AND ?", [match_id, f0, f1]).fetchall()
+    con.close()
+    wt: dict[str, dict[int, list]] = {}
+    for f, pid, kps in rows:
+        if kps is None:
+            continue
+        pts = [(kps[3 * j], kps[3 * j + 1]) for j in WRIST_IDX if kps[3 * j + 2] > 0.3]
+        if pts:
+            wt.setdefault(pid, {})[int(f)] = pts
+
+    ex_frames = [h["frame"] for h in existing]
+    found: list[dict] = []
+    for pid, w in wt.items():
+        fs = sorted(w)
+        spd = {}
+        for a, b in zip(fs, fs[1:]):
+            if b - a <= 2:
+                d = min(np.hypot(p[0] - q[0], p[1] - q[1]) for p in w[a] for q in w[b])
+                spd[b] = d / (b - a)
+        for f in sorted(spd):
+            if spd[f] < WRIST_PK:
+                continue
+            if any(abs(f - g) < MIN_GAP for g in ex_frames) or \
+                    any(abs(f - g["frame"]) < MIN_GAP for g in found):
+                continue
+            close = []
+            for df_ in (0, -1, 1, -2, 2):
+                i = f + df_ - base
+                if 0 <= i < len(xy_raw) and not np.isnan(xy_raw[i]).any():
+                    d = min(np.hypot(xy_raw[i, 0] - p[0], xy_raw[i, 1] - p[1])
+                            for p in w.get(f, []) + w.get(f - 1, []))
+                    close.append((d, i))
+            if close:
+                d, i = min(close)
+                if d <= WRIST_SH_PX:
+                    found.append(dict(frame=f, x=float(xy_raw[i, 0]),
+                                      y=float(xy_raw[i, 1]),
+                                      score=float(spd[f] / WRIST_PK), wrist=True))
+    return found
 
 
 def _player_refs(match_id: str, f0: int, f1: int) -> dict:
@@ -162,7 +222,7 @@ def _player_refs(match_id: str, f0: int, f1: int) -> dict:
                 if c > 0.3:
                     pts.append((x, y))
         if not pts and bbox is not None:
-            pts.append((bbox[0] + bbox[2] / 2, bbox[1] + bbox[3] / 2))
+            pts.append((bbox[0], bbox[1]))  # YOLO stores center x/y, width/height
         refs[(f, pid)] = pts
     return refs
 
@@ -236,7 +296,7 @@ def validate(match_id: str, tol: int = 6, verbose: bool = True,
     """Score detected hits + landings against ShuttleSet labels, rally by rally."""
     sdf = insights.stroke_df(match_id)
     rdf = insights.rally_df(match_id, sdf)
-    smap = insights.side_map_from(sdf)
+    smap = insights.rally_side_map(sdf)
     m = config.get_match(match_id)
     H = np.array(m["homography"], dtype=np.float32).reshape(3, 3)
 
@@ -260,7 +320,7 @@ def validate(match_id: str, tol: int = 6, verbose: bool = True,
             _, j = min(cands)
             used[j] = True
             tp += 1
-            want = smap.get((int(sn), hitter))
+            want = smap.get((int(sn), int(rid)), {}).get(hitter)
             if hits[j]["player"] is not None and want is not None:
                 attr_n += 1
                 attr_ok += hits[j]["player"] == want

@@ -108,21 +108,22 @@ def import_match(match_id: str) -> int:
         set_no = int(path.stem.replace("set", ""))
         records.extend(_rows(match_id, set_no, path, base_id))
 
-    con = db.connect()
-    # ensure the match row exists, then refresh strokes for this match (idempotent)
-    con.execute(
-        "INSERT INTO matches (match_id, discipline, tournament, fps, camera_view, source) "
-        "VALUES (?, ?, ?, ?, 'broadcast', 'shuttleset') ON CONFLICT (match_id) DO NOTHING",
-        [match_id, m.get("discipline"), m.get("tournament"), m.get("fps")],
-    )
-    con.execute("DELETE FROM strokes WHERE match_id = ? AND source = 'shuttleset'", [match_id])
+    if not records:
+        raise ValueError(f"no strokes in {ss_dir}")
+    with db.transaction() as con:
+        # ensure the match row exists, then refresh strokes for this match (idempotent)
+        con.execute(
+            "INSERT INTO matches (match_id, discipline, tournament, fps, camera_view, source) "
+            "VALUES (?, ?, ?, ?, 'broadcast', 'shuttleset') ON CONFLICT (match_id) DO NOTHING",
+            [match_id, m.get("discipline"), m.get("tournament"), m.get("fps")],
+        )
+        con.execute("DELETE FROM strokes WHERE match_id = ? AND source = 'shuttleset'", [match_id])
 
-    cols = list(records[0])
-    con.executemany(
-        f"INSERT INTO strokes ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
-        [[rec[c] for c in cols] for rec in records],
-    )
-    con.close()
+        cols = list(records[0])
+        con.executemany(
+            f"INSERT INTO strokes ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+            [[rec[c] for c in cols] for rec in records],
+        )
     return len(records)
 
 

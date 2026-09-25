@@ -104,40 +104,62 @@ def _forward(net, JnB: np.ndarray, sh: np.ndarray, batch: int) -> np.ndarray:
     return torch.cat(probs).numpy()
 
 
-def classify_centers(match_id: str, centers: list[int], batch: int = 256) -> list[dict]:
-    """BST predictions for arbitrary window centers (video frames) — the interface
-    pipeline.py uses at DETECTED hit frames. Returns side/shot/conf per center."""
+def probs_centers(match_id: str, centers: list[int], batch: int = 256) -> np.ndarray:
+    """Raw 25-class softmax probs at arbitrary window centers (video frames)."""
     con = db.connect(read_only=True)
     arrays = [_window_arrays(con, match_id, int(c)) for c in centers]
     con.close()
     JnB = np.stack([a[0] for a in arrays]).astype(np.float32)
     sh = np.stack([a[1] for a in arrays]).astype(np.float32)
-    probs = _forward(_load_net(), JnB, sh, batch)
-    out = []
-    for c, p in zip(centers, probs):
-        i = int(p.argmax())
-        name = CLASSES[i]
-        unknown = name == "未知球種"
-        out.append(dict(
-            frame=int(c), conf=float(p[i]),
-            side=None if unknown else ("far" if name.startswith("Top_") else "near"),
-            shot=None if unknown else
-            shuttleset.canonical_shot_type(name.split("_", 1)[1])))
-    return out
+    return _forward(_load_net(), JnB, sh, batch)
+
+
+_EN_COLS: dict | None = None
+
+
+def canonical_prob_frame(probs: np.ndarray):
+    """25-class prob matrix -> stacking-feature frame: p_<canonical shot> ×10
+    (Top_/Bottom_ summed), p_unknown, bst_conf, plus the argmax side/shot."""
+    import pandas as pd
+
+    from . import insights
+    global _EN_COLS
+    if _EN_COLS is None:
+        _EN_COLS = {en: [i for i, n in enumerate(CLASSES) if n != "未知球種" and
+                         shuttleset.canonical_shot_type(n.split("_", 1)[1]) == en]
+                    for en in insights.SHOT_ORDER}
+    d = pd.DataFrame({f"p_{en}": probs[:, cols].sum(1)
+                      for en, cols in _EN_COLS.items()})
+    d["p_unknown"] = probs[:, 0]
+    d["bst_conf"] = probs.max(1)
+    names = [CLASSES[i] for i in probs.argmax(1)]
+    d["bst_side"] = [None if n == "未知球種" else
+                     ("far" if n.startswith("Top_") else "near") for n in names]
+    d["bst_shot"] = [None if n == "未知球種" else
+                     shuttleset.canonical_shot_type(n.split("_", 1)[1]) for n in names]
+    return d
+
+
+def classify_centers(match_id: str, centers: list[int], batch: int = 256) -> list[dict]:
+    """BST predictions for arbitrary window centers (video frames) — the interface
+    pipeline.py uses at DETECTED hit frames. Returns side/shot/conf per center."""
+    d = canonical_prob_frame(probs_centers(match_id, centers, batch))
+    return [dict(frame=int(c), conf=float(r.bst_conf), side=r.bst_side, shot=r.bst_shot)
+            for c, r in zip(centers, d.itertuples())]
 
 
 def build_inputs(match_id: str):
     """(JnB, shuttle, labels, ids) for every labeled stroke with a known class."""
     from . import hits
     sdf = insights.stroke_df(match_id)
-    smap = insights.side_map_from(sdf)
+    smap = insights.rally_side_map(sdf)
     off = hits.shuttle_offset(match_id)
     con = db.connect(read_only=True)
 
     JnBs, shuttles, labels, ids = [], [], [], []
     for _, s in sdf.iterrows():
         en = s["shot"] if s["shot"] in shuttleset._CN_EN.values() else None
-        side = smap.get((int(s["set_no"]), s["hitter"]))   # 'near' | 'far'
+        side = smap.get((int(s["set_no"]), int(s["rally_id"])), {}).get(s["hitter"])   # 'near' | 'far'
         if en is None or side is None:
             continue
         ids.append((int(s["set_no"]), int(s["rally_id"]), int(s["ball_round"])))

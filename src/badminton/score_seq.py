@@ -201,3 +201,20 @@ def serve_court_parity(server_x: float, receiver_x: float, server_near: bool,
     # (larger x); the far player faces the camera, so theirs is screen-left.
     on_right = dx > 0 if server_near else dx < 0
     return on_right
+
+
+def confirm_winner(prev_x: int, prev_y: int, cand: str | None,
+                   parity_even: bool | None) -> str | None:
+    """Cross-check a "winner serves next" candidate against the serve-court parity.
+
+    `cand` ('x'|'y') is who the NEXT rally's serve SIDE says won this rally (rule
+    11.2: the winner serves next). If they did win, their score moved to prev+1 —
+    and rule 9.1 fixes the serving court by that score's parity, which
+    `serve_court_parity` reads off the stance (`parity_even`). Two independent
+    geometric observations of the same rally: return `cand` only when they AGREE,
+    None otherwise. Never guesses — an OCR-less winner must earn both votes.
+    """
+    if parity_even is None or cand not in ("x", "y"):
+        return None
+    score = (prev_x if cand == "x" else prev_y) + 1
+    return cand if (score % 2 == 0) == parity_even else None

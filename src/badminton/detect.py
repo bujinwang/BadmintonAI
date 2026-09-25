@@ -57,6 +57,8 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
                   start_frame: int = 0, max_frames: int | None = None,
                   device: str = "mps", imgsz: int = 1280, margin: float = 0.7,
                   stride: int = 1) -> int:
+    if start_frame < 0 or stride < 1 or (max_frames is not None and max_frames < 1):
+        raise ValueError("start_frame must be nonnegative; stride and max_frames must be positive")
     import cv2
     from ultralytics import YOLO
 
@@ -67,10 +69,16 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
     video = config.REPO_ROOT / m["video_path"]
 
     model = YOLO(model_name)
-    span = max_frames * stride if max_frames else 2**31  # frames this run will (re)compute
-
     cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        cap.release()
+        raise OSError(f"cannot open video: {video}")
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    expected_frames = max_frames
+    if total_frames > 0:
+        remaining = max(0, (total_frames - start_frame + stride - 1) // stride)
+        expected_frames = min(max_frames, remaining) if max_frames is not None else remaining
 
     rows: list[list] = []
     n_frames = 0
@@ -118,18 +126,22 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
             ])
 
     cap.release()
+    if not n_frames:
+        raise OSError(f"no frames decoded from {video} at frame {start_frame}")
+    if expected_frames is not None and n_frames < expected_frames:
+        raise OSError(f"incomplete video chunk: decoded {n_frames}/{expected_frames} frames from {video}")
     # take the write lock only now (seconds), so the dashboard can read during the run
-    con = db.connect()
-    con.execute("DELETE FROM tracks WHERE match_id=? AND frame_num>=? AND frame_num<?",
-                [match_id, start_frame, start_frame + span])
-    if rows:
-        con.executemany(
-            "INSERT INTO tracks (match_id, frame_num, player_id, court_x, court_y, "
-            "img_x, img_y, bbox, keypoints, pose_conf) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            rows,
-        )
-    con.close()
+    with db.transaction() as con:
+        # A failed/early decode must not erase the unprocessed remainder of a chunk.
+        con.execute("DELETE FROM tracks WHERE match_id=? AND frame_num>=? AND frame_num<?",
+                    [match_id, start_frame, frame_idx])
+        if rows:
+            con.executemany(
+                "INSERT INTO tracks (match_id, frame_num, player_id, court_x, court_y, "
+                "img_x, img_y, bbox, keypoints, pose_conf) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
     print(f"processed {n_frames} frames -> {len(rows)} track rows")
     return len(rows)
 
@@ -138,6 +150,11 @@ def process_frames(match_id: str, frames: list[int], model_name: str = "yolo11x-
                    device: str = "mps", imgsz: int = 1280, margin: float = 0.7) -> int:
     """Single-frame pose on an explicit (sorted) frame list — for match-wide validation
     at the labeled stroke frames. No tracking; consecutive frames avoid re-seeking."""
+    frames = sorted(set(frames))
+    if not frames:
+        return 0
+    if frames[0] < 0:
+        raise ValueError("frame numbers must be nonnegative")
     import cv2
     from ultralytics import YOLO
 
@@ -145,8 +162,12 @@ def process_frames(match_id: str, frames: list[int], model_name: str = "yolo11x-
     H = np.array(m["homography"], dtype=np.float32).reshape(3, 3)
     model = YOLO(model_name)
     cap = cv2.VideoCapture(str(config.REPO_ROOT / m["video_path"]))
+    if not cap.isOpened():
+        cap.release()
+        raise OSError(f"cannot open video: {m['video_path']}")
 
     rows: list[list] = []
+    decoded: list[int] = []
     prev = None
     for fr in frames:
         if fr != (prev + 1 if prev is not None else None):
@@ -154,7 +175,9 @@ def process_frames(match_id: str, frames: list[int], model_name: str = "yolo11x-
         prev = fr
         ok, frame = cap.read()
         if not ok:
+            prev = None
             continue
+        decoded.append(fr)
         res = model.predict(frame, imgsz=imgsz, device=device, verbose=False)[0]
         if res.keypoints is None or res.boxes is None:
             continue
@@ -176,13 +199,15 @@ def process_frames(match_id: str, frames: list[int], model_name: str = "yolo11x-
             rows.append([match_id, fr, pid, float(cxy[0]), float(cxy[1]),
                          float(fp[0]), float(fp[1]), box.tolist(), kp51, float(kcf_i.mean())])
     cap.release()
-    con = db.connect()                       # brief write lock at the end only
-    con.execute("DELETE FROM tracks WHERE match_id = ?", [match_id])
-    if rows:
-        con.executemany(
-            "INSERT INTO tracks (match_id, frame_num, player_id, court_x, court_y, "
-            "img_x, img_y, bbox, keypoints, pose_conf) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
-    con.close()
+    if not decoded:
+        raise OSError(f"no requested frames decoded from {m['video_path']}")
+    with db.transaction() as con:
+        con.execute("DELETE FROM tracks WHERE match_id=? AND frame_num IN (SELECT unnest(?))",
+                    [match_id, decoded])
+        if rows:
+            con.executemany(
+                "INSERT INTO tracks (match_id, frame_num, player_id, court_x, court_y, "
+                "img_x, img_y, bbox, keypoints, pose_conf) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
     print(f"processed {len(frames)} frames -> {len(rows)} track rows")
     return len(rows)
 

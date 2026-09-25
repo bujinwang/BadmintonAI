@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import contextmanager
 
 import duckdb
 
@@ -25,3 +26,18 @@ def init_db(db_path: Path | str = DEFAULT_DB) -> Path:
     con.execute(SCHEMA_SQL.read_text())
     con.close()
     return Path(db_path)
+
+
+@contextmanager
+def transaction(db_path: Path | str = DEFAULT_DB):
+    """Commit a replacement atomically; failures leave the previous rows intact."""
+    con = connect(db_path)
+    try:
+        con.execute("BEGIN TRANSACTION")
+        yield con
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
