@@ -36,6 +36,7 @@ third_party/
 
 # Plan-B share bundles are build output; the blobs are gitignored above
 dist/
-node_modules/
-.wrangler/
-.dev.vars
+
+# JavaScript projects keep their own ignore rules — web/.gitignore and
+# infra/share-worker/.gitignore — so the root never hides a stray node_modules
+# that a wrong `npm install` would drop here.

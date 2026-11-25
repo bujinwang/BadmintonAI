@@ -1,0 +1,50 @@
+name: share-worker
+
+# Deliberately a separate workflow rather than another job in tests.yml: this directory
+# is an independent npm project, and the Python suite should never have to install
+# JavaScript to lint one worker. The path filter keeps both sides quiet.
+on:
+  push:
+    paths:
+      - "infra/share-worker/**"
+      - ".github/workflows/share-worker.yml"
+  pull_request:
+    paths:
+      - "infra/share-worker/**"
+      - ".github/workflows/share-worker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: share-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: infra/share-worker
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: infra/share-worker/package-lock.json
+
+      # npm ci, not install: the lockfile is the contract, and a fresh runner has no
+      # node_modules anywhere above the checkout.
+      - run: npm ci
+
+      # This is also the real self-containment test — locally a stray ~/node_modules can
+      # satisfy a missing dependency; here it cannot, so a leak fails loudly instead of
+      # shipping.
+      - run: npm run verify:isolation
+
+      - run: npm run typecheck
+
+      # Bundles with esbuild exactly as `wrangler deploy` would, without an account or
+      # network call. Catches a missing runtime import that tsc would not.
+      - run: npm run bundle:dry

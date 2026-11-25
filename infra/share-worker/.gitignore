@@ -1,0 +1,7 @@
+# This directory is its own npm project, so it owns its own ignore rules instead of
+# inheriting broad patterns from the repo root. Nothing here may be committed: the
+# worker is deployed by `wrangler deploy`, not from the git tree.
+node_modules/
+.wrangler/
+.dev.vars
+dist/

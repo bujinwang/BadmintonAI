@@ -24,6 +24,13 @@ web/node_modules/
 web/.next/
 web/out/
 
+# Share worker: a Cloudflare deploy target, never COPYed into the image. Its
+# node_modules is ~300 MB of wrangler + workerd and would only slow the context.
+infra/share-worker/node_modules/
+infra/share-worker/.wrangler/
+infra/share-worker/.dev.vars
+dist/
+
 # VCS / OS / editor
 .git/
 .gitignore
