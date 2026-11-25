@@ -48,7 +48,9 @@ def render_match(match_id: str, limit: int | None = None,
     try:
         scores = identity.rally_scores_ocr(match_id, windows)   # (a,b,top,bot) per rally
         rsides = sets.rally_sides(scores)
-    except Exception as e:
+    except (Exception, SystemExit) as e:
+        # identity.rally_scores_ocr raises SystemExit when the scoreboard box is
+        # uncalibrated; degrade to a single set instead of aborting the render.
         print(f"note: scoreboard OCR failed ({e}); using a single set, no scores")
         scores = [(a, b, None, None) for a, b in windows]
         rsides = [{"set": 1, "near_pair": "A", "far_pair": "B"} for _ in windows]

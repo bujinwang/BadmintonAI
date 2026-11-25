@@ -134,7 +134,10 @@ def _ocr_scores(match_id: str, windows):
     shared by both set detection and the Points view (the cv2 seeks are the slow part)."""
     try:
         return _identity.rally_scores_ocr(match_id, windows)
-    except Exception as e:  # OCR/scoreboard failure must not break the whole export
+    except (Exception, SystemExit) as e:  # OCR/scoreboard failure must not break the whole export
+        # identity.rally_scores_ocr raises SystemExit (not an Exception) when the
+        # scoreboard box is uncalibrated; catch it here so the rest of the export
+        # degrades to a single set instead of dying.
         print(f"  note: scoreboard OCR failed ({e}); treating as a single set, no scores")
         return None
 

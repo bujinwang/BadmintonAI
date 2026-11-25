@@ -177,3 +177,37 @@ all_england_2022_ws_final:
   - 0.0013693097100325902
   - 1.0
   ss_shuttle_offset: -1
+hkwd_2026_wd_f:
+  match_id: hkwd_2026_wd_f
+  discipline: doubles
+  player_near: null
+  player_far: null
+  tournament: LI-NING Hong Kong Open 2026
+  round: Final
+  result: ''
+  match_date: '2026-09-13'
+  players:
+  - Tan Pearly / Thinaah Muralitharan
+  - Nakade Yuki / Takahashi Ayaka
+  video_url: https://youtu.be/NkCmau4bKv4
+  video_path: data/raw/hkwd_2026_wd_f.mp4
+  fps: 30.0
+  court_corners_px:
+  - - 180.0
+    - 716.0
+  - - 1101.0
+    - 716.0
+  - - 964.0
+    - 337.0
+  - - 338.0
+    - 337.0
+  homography:
+  - 0.01677246511219278
+  - 0.006992215007193821
+  - -8.025469665345476
+  - 0.0
+  - -0.06085650077796039
+  - 43.57325455701964
+  - 0.0
+  - 0.002140177730262673
+  - 1.0
