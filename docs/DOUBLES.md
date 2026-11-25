@@ -44,7 +44,10 @@ persistent player identity, so we rely on geometry, not names.
    py -m badminton.doubles.track <match_id> --model yolo11x-pose.pt \
        --start-frame <F> --max-frames <N> --stride <S>
    ```
-   Start with a short window (`--max-frames 600`) on one clean rally.
+   Start with a short window (`--max-frames 600`) on one clean rally. `--dry-run` runs the
+   whole chain without writing to `tracks`. Add `--pose-backend rtmlib` for the AGPL-free
+   pose stack (YOLOX + RTMPose, no torch) — accuracy/speed trade-off measured in
+   [POSE_BACKENDS.md](POSE_BACKENDS.md).
 3. Sanity-check the geometry before anything downstream:
    ```bash
    py -m badminton.doubles.roles <match_id>     # per-side attack/defence %, median gaps

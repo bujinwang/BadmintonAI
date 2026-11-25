@@ -592,6 +592,47 @@ def test_segment_merges_using_match_fps():
         assert segment.rally_windows("test") == [(0, 1200)]
 
 
+def _pdet(cx: float, cy: float, w: float = 40.0, h: float = 100.0):
+    """A PoseDet with a plain box and zero keypoints — tracking only looks at the box."""
+    from badminton.doubles.pose import PoseDet
+    return PoseDet(-1, np.array([cx, cy, w, h], float), *_DUMMY[:2])
+
+
+def test_iou_tracker_keeps_ids_across_small_motion():
+    """A player moving a few pixels per frame keeps the same id."""
+    from badminton.doubles.tracking import IouTracker
+    t = IouTracker()
+    ids0 = [d.tid for d in t.update([_pdet(100, 300), _pdet(200, 300)])]
+    ids1 = [d.tid for d in t.update([_pdet(106, 302), _pdet(204, 299)])]
+    assert ids0 == [1, 2], ids0
+    assert ids1 == [1, 2], f"ids drifted on small motion: {ids1}"
+    assert len(set(ids1)) == 2, "two players collapsed onto one id"
+
+
+def test_iou_tracker_does_not_follow_a_teleport():
+    """A detection that jumps off its track is a NEW person, not the old one moved."""
+    from badminton.doubles.tracking import IouTracker
+    t = IouTracker()
+    t.update([_pdet(100, 300)])
+    (moved,) = t.update([_pdet(600, 300)])   # no overlap with the previous box
+    assert moved.tid != 1, f"teleport inherited id {moved.tid}"
+
+
+def test_iou_tracker_retires_stale_ids_and_never_reuses_them():
+    """After max_age silent frames the track is dropped; a returning player gets a new id.
+
+    Reuse would be worse than a new id: SlotAssigner keys its sticky court half off the
+    id, so a recycled id could strand a fresh player on the wrong side of the net."""
+    from badminton.doubles.tracking import IouTracker
+    t = IouTracker(max_age=2)
+    (first,) = t.update([_pdet(100, 300)])
+    for _ in range(3):                       # > max_age frames with nobody detected
+        t.update([])
+    (later,) = t.update([_pdet(100, 300)])
+    assert later.tid != first.tid, f"stale id {first.tid} was reused"
+    assert first.tid == 1 and later.tid == 2, (first.tid, later.tid)
+
+
 def _run() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

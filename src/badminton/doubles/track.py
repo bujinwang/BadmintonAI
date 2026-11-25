@@ -28,7 +28,12 @@ serve — service court is fixed by score parity — is a later refinement; see 
 
 CLI:
   PYTHONPATH=src python -m badminton.doubles.track <match_id> \
-      [--model yolo11x-pose.pt] [--start-frame F] [--max-frames N] [--stride S]
+      [--model yolo11x-pose.pt] [--start-frame F] [--max-frames N] [--stride S] \
+      [--pose-backend ultralytics|ultralytics-iou|rtmlib]
+
+`--pose-backend` selects the detection+tracking stack (see badminton.doubles.pose). The
+default is the validated Ultralytics path; `rtmlib` is the AGPL-free substitute, compared
+against it by scripts/bench_pose_backends.py.
 """
 
 from __future__ import annotations
@@ -266,33 +271,33 @@ def _ensure_match_row(con, match_id: str, m: dict) -> None:
          m.get("video_url"), m.get("fps"), "broadcast", m.get("homography"), "pipeline"])
 
 
-def _detections(res, H: np.ndarray, margin: float) -> list[_Det]:
-    """In-court people for one frame as _Det (rejects umpire/coaches via in_court)."""
-    if res.keypoints is None or res.boxes is None or res.boxes.id is None:
-        return []
-    kxy = res.keypoints.xy.cpu().numpy()
-    kcf = res.keypoints.conf.cpu().numpy()
-    boxes = res.boxes.xywh.cpu().numpy()
-    tids = res.boxes.id.cpu().numpy().astype(int)
+def _detections(pdets, H: np.ndarray, margin: float) -> list[_Det]:
+    """In-court people for one frame as _Det (rejects umpire/coaches via in_court).
+
+    Consumes the backend-neutral PoseDet list from badminton.doubles.pose, so the
+    geometry below is byte-for-byte the same whichever model produced the keypoints —
+    which is what makes a backend swap a controlled comparison rather than a rewrite."""
     out: list[_Det] = []
-    for i in range(len(tids)):
-        fp = ground_point(boxes[i], kxy[i], kcf[i])
+    for p in pdets:
+        fp = ground_point(p.box, p.kxy, p.kcf)
         cxy = court.image_to_court(fp.reshape(1, 2), H)[0]
         if not court.in_court(cxy, margin=margin):
             continue
-        out.append(_Det(int(tids[i]), cxy, fp, kxy[i], kcf[i], boxes[i],
-                        float(boxes[i, 2] * boxes[i, 3])))
+        out.append(_Det(int(p.tid), cxy, fp, p.kxy, p.kcf, p.box,
+                        float(p.box[2] * p.box[3])))
     return out
 
 
 def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
                   start_frame: int = 0, max_frames: int | None = None,
                   device: str = "mps", imgsz: int = 1280, margin: float = 0.7,
-                  stride: int = 1, conf: float = 0.25) -> int:
+                  stride: int = 1, conf: float = 0.25,
+                  pose_backend: str = "ultralytics", dry_run: bool = False) -> int:
     if start_frame < 0 or stride < 1 or (max_frames is not None and max_frames < 1):
         raise ValueError("start_frame must be nonnegative; stride and max_frames must be positive")
     import cv2
-    from ultralytics import YOLO
+
+    from . import pose
 
     m = config.get_match(match_id)
     if m.get("discipline") not in (None, "doubles"):
@@ -303,7 +308,10 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
     H = np.array(m["homography"], dtype=np.float32).reshape(3, 3)
     video = config.REPO_ROOT / m["video_path"]
 
-    model = YOLO(model_name)
+    # `device` is a torch name for Ultralytics and a backend name for rtmlib ('cpu' or
+    # 'mps'); the factory passes it to whichever needs it.
+    detector = pose.build(pose_backend, model=model_name, device=device,
+                          imgsz=imgsz, conf=conf, court_roi=(H, margin))
     assigner = SlotAssigner()
 
     cap = cv2.VideoCapture(str(video))
@@ -324,8 +332,7 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
         ok, frame = cap.read()
         if not ok:
             break
-        res = model.track(frame, persist=True, tracker="bytetrack.yaml",
-                          imgsz=imgsz, conf=conf, device=device, verbose=False)[0]
+        res = detector(frame)
         n_frames += 1
         cur_frame = frame_idx
         frame_idx += 1
@@ -348,6 +355,12 @@ def process_video(match_id: str, model_name: str = "yolo11x-pose.pt",
         raise OSError(f"no frames decoded from {video} at frame {start_frame}")
     if expected_frames is not None and n_frames < expected_frames:
         raise OSError(f"incomplete video chunk: decoded {n_frames}/{expected_frames} frames from {video}")
+    if dry_run:
+        # Exercise the whole chain (decode -> pose -> slots) without touching tracks, so a
+        # new backend can be sanity-checked on a few frames before a multi-hour run.
+        print(f"dry run: {n_frames} frames, {len(rows)} would-be track rows "
+              f"({len(rows) / n_frames:.2f}/frame) — tracks untouched")
+        return len(rows)
     with db.transaction() as con:
         _ensure_match_row(con, match_id, m)    # tracks FK needs a matches row (label-free path)
         # Keep existing tracks beyond the frames this run actually decoded.
@@ -375,9 +388,16 @@ def main() -> None:
     ap.add_argument("--margin", type=float, default=0.7)
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--conf", type=float, default=0.25, help="detection conf (lower = more far-side recall)")
+    ap.add_argument("--pose-backend", default="ultralytics",
+                    choices=("ultralytics", "ultralytics-iou", "rtmlib"),
+                    help="pose+tracking stack; 'rtmlib' is the licence-clean swap "
+                         "(YOLOX+RTMPose, Apache-2.0) — see badminton.doubles.pose")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="run decode+pose+slots but write nothing to tracks")
     args = ap.parse_args()
     process_video(args.match_id, args.model, args.start_frame, args.max_frames,
-                  args.device, args.imgsz, args.margin, args.stride, args.conf)
+                  args.device, args.imgsz, args.margin, args.stride, args.conf,
+                  args.pose_backend, args.dry_run)
 
 
 if __name__ == "__main__":

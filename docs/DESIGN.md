@@ -44,7 +44,7 @@ Video ──┬─► Court mapping (homography, calibrate once)
 
 | Stage | Pick for v1 | Why / migrate to | Watch-out |
 |---|---|---|---|
-| Detection + pose | **YOLO11-Pose** | fastest to prototype → **RTMPose** (Apache-2.0) before productizing | Ultralytics is **AGPL-3.0** (commercial risk) |
+| Detection + pose | **YOLO11-Pose** | fastest to prototype → **RTMPose** (Apache-2.0) before productizing — built and measured, see [POSE_BACKENDS.md](POSE_BACKENDS.md) | Ultralytics is **AGPL-3.0** (commercial risk) |
 | Player ID tracking | **ByteTrack** + "which court half" rule | singles has 1 player/half → near-free ID | doubles needs **BoT-SORT + ReID** |
 | Court → coords | manual `cv2.getPerspectiveTransform` | controlled capture = calibrate once | broadcast cuts/zooms break a fixed matrix |
 | Data layer | **Polars + DuckDB/Parquet** | SQL analytics, no server, event schema | — |

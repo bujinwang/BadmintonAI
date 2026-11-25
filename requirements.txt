@@ -8,6 +8,11 @@ pyyaml
 # Detection/pose (heavy; installs torch + MPS)
 ultralytics              # YOLO11-Pose (AGPL-3.0 — prototype only; migrate to RTMPose later)
 
+# Optional, AGPL-free pose stack: `track.py --pose-backend rtmlib`. YOLOX + RTMPose on
+# ONNX Runtime, no torch, no ultralytics. Measured in docs/POSE_BACKENDS.md.
+#   rtmlib
+#   onnxruntime
+
 # Phase 1 — analytics dashboard
 streamlit
 altair
