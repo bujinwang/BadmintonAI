@@ -33,3 +33,9 @@ third_party/
 
 # OS
 .DS_Store
+
+# Plan-B share bundles are build output; the blobs are gitignored above
+dist/
+node_modules/
+.wrangler/
+.dev.vars
